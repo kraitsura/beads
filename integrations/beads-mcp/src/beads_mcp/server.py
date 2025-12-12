@@ -14,7 +14,7 @@ from typing import Any, Awaitable, Callable, TypeVar
 
 from fastmcp import FastMCP
 
-from beads_mcp.models import BlockedIssue, BriefIssue, BriefTreeNode, DependencyType, Issue, IssueStatus, IssueType, OperationResult, Stats
+from beads_mcp.models import BlockedIssue, BriefDep, BriefIssue, BriefTreeNode, DependencyType, Issue, IssueStatus, IssueType, OperationResult, Stats
 from beads_mcp.tools import (
     beads_add_dependency,
     beads_blocked,
@@ -500,13 +500,20 @@ async def list_issues(
 
 @mcp.tool(
     name="show",
-    description="Show detailed information about a specific issue including dependencies and dependents.",
+    description="""Show detailed information about a specific issue including dependencies and dependents.
+
+Output modes:
+- Default: Full issue with full dependency objects
+- brief=True: Just {id, title, status}
+- brief_deps=True: Full issue but deps as {id, title, status, dependency_type}
+- fields=["id", "dependencies"]: Only specified fields""",
 )
 @with_workspace
 async def show_issue(
     issue_id: str,
     # Output control
     brief: bool = False,
+    brief_deps: bool = False,  # True=deps as {id,title,status,dep_type}, False=full Issue objects
     fields: list[str] | None = None,
     max_description_length: int | None = None,
     workspace_root: str | None = None,
@@ -519,11 +526,46 @@ async def show_issue(
         return BriefIssue(id=issue.id, title=issue.title, status=issue.status)
 
     if fields:
-        return {k: getattr(issue, k, None) for k in fields if hasattr(issue, k)}
+        result = {k: getattr(issue, k, None) for k in fields if hasattr(issue, k)}
+        # Apply brief_deps to fields output if dependencies/dependents requested
+        if brief_deps:
+            if "dependencies" in result and result["dependencies"]:
+                result["dependencies"] = [
+                    BriefDep(
+                        id=d.id, title=d.title, status=d.status,
+                        dependency_type=getattr(d, "dependency_type", None)
+                    ) for d in result["dependencies"]
+                ]
+            if "dependents" in result and result["dependents"]:
+                result["dependents"] = [
+                    BriefDep(
+                        id=d.id, title=d.title, status=d.status,
+                        dependency_type=getattr(d, "dependency_type", None)
+                    ) for d in result["dependents"]
+                ]
+        return result
 
     if max_description_length:
         if issue.description and len(issue.description) > max_description_length:
             issue.description = issue.description[:max_description_length] + "..."
+
+    # Convert deps to brief format if requested
+    if brief_deps:
+        # Convert to dict so we can modify deps
+        issue_dict = issue.model_dump()
+        if issue_dict.get("dependencies"):
+            issue_dict["dependencies"] = [
+                {"id": d["id"], "title": d["title"], "status": d["status"],
+                 "dependency_type": d.get("dependency_type")}
+                for d in issue_dict["dependencies"]
+            ]
+        if issue_dict.get("dependents"):
+            issue_dict["dependents"] = [
+                {"id": d["id"], "title": d["title"], "status": d["status"],
+                 "dependency_type": d.get("dependency_type")}
+                for d in issue_dict["dependents"]
+            ]
+        return issue_dict
 
     return issue
 

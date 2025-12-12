@@ -64,6 +64,18 @@ class BriefIssue(BaseModel):
     status: IssueStatus
 
 
+class BriefDep(BaseModel):
+    """Minimal dependency representation for show() with brief_deps=True.
+
+    Includes dependency_type to understand the relationship.
+    ~50 bytes per dep vs ~1-2KB for full Issue object.
+    """
+    id: str
+    title: str
+    status: IssueStatus
+    dependency_type: str | None = None
+
+
 class BriefTreeNode(BaseModel):
     """Minimal tree node for dependency visualization.
 
