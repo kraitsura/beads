@@ -131,6 +131,7 @@ The MCP tools support parameters to minimize response size:
 ### For Read Operations (`list`, `ready`, `show`)
 
 - **`brief=True`** - Returns only `{id, title, status}` for scanning
+- **`brief_deps=True`** - (show only) Full issue but deps as `{id, title, status, dependency_type}`
 - **`fields=["id", "dependencies"]`** - Select specific fields to return
 - **`max_description_length=100`** - Truncate long descriptions
 
@@ -139,8 +140,11 @@ The MCP tools support parameters to minimize response size:
 # Find issue by name (minimal output)
 list(query="auth", brief=True)
 
-# Check dependencies only
-show(issue_id, fields=["id", "dependencies"])
+# Check dependencies only (brief dep format)
+show(issue_id, fields=["id", "dependencies"], brief_deps=True)
+
+# Full issue but compact deps
+show(issue_id, brief_deps=True)
 
 # Quick status overview
 ready(brief=True, limit=5)
