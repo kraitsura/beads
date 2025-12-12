@@ -9,8 +9,7 @@
       "name": "beads",
       "source": {
         "source": "github",
-        "repo": "kraitsura/beads",
-        "branch": "local"
+        "repo": "kraitsura/beads"
       },
       "description": "AI-supervised issue tracker for coding workflows with brief output, suggest_next, and improved context control.",
       "version": "0.30.0"
