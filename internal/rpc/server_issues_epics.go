@@ -261,6 +261,14 @@ func (s *Server) handleCreate(req *Request) Response {
 		}
 	}
 
+	// Fetch labels back to include in response (labels are stored in separate table)
+	if len(createArgs.Labels) > 0 {
+		labels, err := store.GetLabels(ctx, issue.ID)
+		if err == nil {
+			issue.Labels = labels
+		}
+	}
+
 	// Emit mutation event for event-driven daemon
 	s.emitMutation(MutationCreate, issue.ID)
 

@@ -213,18 +213,36 @@ await beads_ready_work(workspace_root="/Users/you/project-a")
 - `beads://quickstart` - Quickstart guide for using beads
 
 **Tools (all support `workspace_root` parameter):**
+
+*Issue Management:*
 - `init` - Initialize bd in current directory
-- `create` - Create new issue (bug, feature, task, epic, chore)
-- `list` - List issues with filters (status, priority, type, assignee)
-- `ready` - Find tasks with no blockers ready to work on
-- `show` - Show detailed issue info including dependencies
-- `update` - Update issue (status, priority, design, notes, etc). Note: `status="closed"` or `status="open"` automatically route to `close` or `reopen` tools to respect approval workflows
-- `close` - Close completed issue
-- `dep` - Add dependency (blocks, related, parent-child, discovered-from)
+- `create` - Create new issue (`verbose=True` for full Issue, default returns brief confirmation)
+- `update` - Update issue (status, priority, labels via `add_labels`/`remove_labels`, `estimated_minutes`, etc.)
+- `close` - Close completed issue (`suggest_next=True` shows newly unblocked issues)
+- `reopen` - Reopen closed issues with optional reason
+
+*Querying:*
+- `list` - List issues with filters (status, priority, type, assignee, `labels`, `labels_any`, `query`, `unassigned`)
+- `ready` - Find tasks with no blockers (`labels`, `unassigned`, `sort_policy`)
+- `show` - Show detailed issue info (`brief`, `fields`, `max_description_length`)
 - `blocked` - Get blocked issues
 - `stats` - Get project statistics
-- `reopen` - Reopen a closed issue with optional reason
+
+*Dependencies:*
+- `dep` - Add dependency (blocks, related, parent-child, discovered-from)
+- `dep_remove` - Remove a dependency
+- `dep_tree` - View full dependency chain
+
+*Comments:*
+- `comment_add` - Add comment to track progress/decisions
+- `comment_list` - List comments on an issue
+
+*Context:*
 - `set_context` - Set default workspace for subsequent calls (backward compatibility)
+
+**Output Control:**
+- Read operations support `brief=True`, `fields=[...]`, `max_description_length`
+- Write operations return brief confirmations by default; use `verbose=True` for full objects
 
 ## Known Issues
 

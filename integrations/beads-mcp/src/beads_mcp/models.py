@@ -54,6 +54,28 @@ class Issue(IssueBase):
     dependents: list[LinkedIssue] = Field(default_factory=list)
 
 
+class BriefIssue(BaseModel):
+    """Minimal issue representation for scanning/identification.
+
+    Used when `brief=True` to reduce context size.
+    """
+    id: str
+    title: str
+    status: IssueStatus
+
+
+class OperationResult(BaseModel):
+    """Brief confirmation for write operations.
+
+    Returned by default (verbose=False) to minimize context usage.
+    Use verbose=True to get full object details.
+    """
+    ok: bool = True
+    id: str  # Issue ID affected (or "bd-1->bd-2" for deps)
+    action: str  # "created", "updated", "closed", "reopened", "dep_added", etc.
+    message: str | None = None  # Optional details
+
+
 class Dependency(BaseModel):
     """Dependency relationship model."""
 
@@ -91,6 +113,11 @@ class UpdateIssueParams(BaseModel):
     acceptance_criteria: str | None = None
     notes: str | None = None
     external_ref: str | None = None
+    # Label operations
+    add_labels: list[str] = Field(default_factory=list)  # Add labels without removing existing
+    remove_labels: list[str] = Field(default_factory=list)  # Remove specific labels
+    # Time estimate
+    estimated_minutes: int | None = None
 
 
 class CloseIssueParams(BaseModel):
@@ -115,12 +142,49 @@ class AddDependencyParams(BaseModel):
     dep_type: DependencyType = "blocks"
 
 
+class RemoveDependencyParams(BaseModel):
+    """Parameters for removing a dependency."""
+
+    issue_id: str
+    depends_on_id: str
+    dep_type: DependencyType | None = None  # Optional: remove specific type
+
+
+class DepTreeParams(BaseModel):
+    """Parameters for getting dependency tree."""
+
+    issue_id: str
+    max_depth: int = Field(default=3, ge=1, le=10)
+
+
+class CommentAddParams(BaseModel):
+    """Parameters for adding a comment."""
+
+    issue_id: str
+    text: str
+    author: str | None = None  # Defaults to BEADS_ACTOR
+
+
+class CommentListParams(BaseModel):
+    """Parameters for listing comments."""
+
+    issue_id: str
+
+
+SortPolicy = Literal["hybrid", "priority", "oldest"]
+
+
 class ReadyWorkParams(BaseModel):
     """Parameters for querying ready work."""
 
     limit: int = Field(default=10, ge=1, le=100)
     priority: int | None = Field(default=None, ge=0, le=4)
     assignee: str | None = None
+    # Scoping parameters
+    labels: list[str] = Field(default_factory=list)  # AND semantics
+    labels_any: list[str] = Field(default_factory=list)  # OR semantics
+    unassigned: bool = False  # Filter for issues with no assignee
+    sort_policy: SortPolicy | None = None  # hybrid, priority, or oldest
 
 
 class ListIssuesParams(BaseModel):
@@ -131,6 +195,11 @@ class ListIssuesParams(BaseModel):
     issue_type: IssueType | None = None
     assignee: str | None = None
     limit: int = Field(default=20, ge=1, le=100)  # Reduced to avoid MCP buffer overflow
+    # Scoping parameters
+    labels: list[str] = Field(default_factory=list)  # AND semantics: must have ALL
+    labels_any: list[str] = Field(default_factory=list)  # OR semantics: must have at least one
+    query: str | None = None  # Free-form search on title/description/id
+    unassigned: bool = False  # Filter for issues with no assignee
 
 
 class ShowIssueParams(BaseModel):

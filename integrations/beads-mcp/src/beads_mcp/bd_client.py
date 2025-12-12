@@ -13,11 +13,15 @@ from .models import (
     AddDependencyParams,
     BlockedIssue,
     CloseIssueParams,
+    CommentAddParams,
+    CommentListParams,
     CreateIssueParams,
+    DepTreeParams,
     InitParams,
     Issue,
     ListIssuesParams,
     ReadyWorkParams,
+    RemoveDependencyParams,
     ReopenIssueParams,
     ShowIssueParams,
     Stats,
@@ -113,6 +117,26 @@ class BdClientBase(ABC):
     @abstractmethod
     async def add_dependency(self, params: AddDependencyParams) -> None:
         """Add a dependency between issues."""
+        pass
+
+    @abstractmethod
+    async def remove_dependency(self, params: RemoveDependencyParams) -> None:
+        """Remove a dependency between issues."""
+        pass
+
+    @abstractmethod
+    async def dep_tree(self, params: DepTreeParams) -> dict[str, Any]:
+        """Get dependency tree for an issue."""
+        pass
+
+    @abstractmethod
+    async def comment_add(self, params: CommentAddParams) -> dict[str, Any]:
+        """Add a comment to an issue."""
+        pass
+
+    @abstractmethod
+    async def comment_list(self, params: CommentListParams) -> List[dict[str, Any]]:
+        """List comments on an issue."""
         pass
 
     @abstractmethod
@@ -385,6 +409,15 @@ class BdCliClient(BdClientBase):
             args.extend(["--priority", str(params.priority)])
         if params.assignee:
             args.extend(["--assignee", params.assignee])
+        # Scoping parameters
+        for label in params.labels:
+            args.extend(["--label", label])
+        for label in params.labels_any:
+            args.extend(["--label-any", label])
+        if params.unassigned:
+            args.append("--unassigned")
+        if params.sort_policy:
+            args.extend(["--sort", params.sort_policy])
 
         data = await self._run_command(*args)
         if not isinstance(data, list):
@@ -414,6 +447,15 @@ class BdCliClient(BdClientBase):
             args.extend(["--assignee", params.assignee])
         if params.limit:
             args.extend(["--limit", str(params.limit)])
+        # Scoping parameters
+        for label in params.labels:
+            args.extend(["--label", label])
+        for label in params.labels_any:
+            args.extend(["--label-any", label])
+        if params.query:
+            args.extend(["--title", params.query])  # Search in title
+        if params.unassigned:
+            args.append("--no-assignee")
 
         data = await self._run_command(*args)
         if not isinstance(data, list):
@@ -508,6 +550,14 @@ class BdCliClient(BdClientBase):
             args.extend(["--notes", params.notes])
         if params.external_ref:
             args.extend(["--external-ref", params.external_ref])
+        # Label operations
+        for label in params.add_labels:
+            args.extend(["--add-label", label])
+        for label in params.remove_labels:
+            args.extend(["--remove-label", label])
+        # Time estimate
+        if params.estimated_minutes is not None:
+            args.extend(["--estimate", str(params.estimated_minutes)])
 
         data = await self._run_command(*args)
         # bd update returns an array, extract first element
@@ -515,7 +565,7 @@ class BdCliClient(BdClientBase):
             if not data:
                 raise BdCommandError(f"Issue not found: {params.issue_id}")
             data = data[0]
-        
+
         if not isinstance(data, dict):
             raise BdCommandError(f"Invalid response for update {params.issue_id}")
 
@@ -602,6 +652,90 @@ class BdCliClient(BdClientBase):
                 stderr=stderr.decode(),
                 returncode=process.returncode or 1,
             )
+
+    async def remove_dependency(self, params: RemoveDependencyParams) -> None:
+        """Remove a dependency between issues.
+
+        Args:
+            params: Dependency removal parameters
+        """
+        cmd = [
+            self.bd_path,
+            "dep",
+            "remove",
+            params.issue_id,
+            params.depends_on_id,
+            *self._global_flags(),
+        ]
+        if params.dep_type:
+            cmd.extend(["--type", params.dep_type])
+
+        env = os.environ.copy()
+        if self.beads_dir:
+            env["BEADS_DIR"] = self.beads_dir
+        elif self.beads_db:
+            env["BEADS_DB"] = self.beads_db
+
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=self._get_working_dir(),
+                env=env,
+            )
+            _stdout, stderr = await process.communicate()
+        except FileNotFoundError as e:
+            raise BdNotFoundError(BdNotFoundError.installation_message(self.bd_path)) from e
+
+        if process.returncode != 0:
+            raise BdCommandError(
+                f"bd dep remove failed: {stderr.decode()}",
+                stderr=stderr.decode(),
+                returncode=process.returncode or 1,
+            )
+
+    async def dep_tree(self, params: DepTreeParams) -> dict[str, Any]:
+        """Get dependency tree for an issue.
+
+        Args:
+            params: Dep tree parameters
+
+        Returns:
+            Dependency tree data
+        """
+        args = ["dep", "tree", params.issue_id, "--depth", str(params.max_depth)]
+        data = await self._run_command(*args)
+        return data if isinstance(data, dict) else {}
+
+    async def comment_add(self, params: CommentAddParams) -> dict[str, Any]:
+        """Add a comment to an issue.
+
+        Args:
+            params: Comment add parameters
+
+        Returns:
+            Created comment data
+        """
+        args = ["comment", "add", params.issue_id, params.text]
+        if params.author:
+            args.extend(["--author", params.author])
+        data = await self._run_command(*args)
+        return data if isinstance(data, dict) else {}
+
+    async def comment_list(self, params: CommentListParams) -> list[dict[str, Any]]:
+        """List comments on an issue.
+
+        Args:
+            params: Comment list parameters
+
+        Returns:
+            List of comments
+        """
+        args = ["comment", "list", params.issue_id]
+        data = await self._run_command(*args)
+        return data if isinstance(data, list) else []
 
     async def quickstart(self) -> str:
         """Get bd quickstart guide.

@@ -1,15 +1,18 @@
 {
   "name": "beads-marketplace",
-  "description": "Local marketplace for beads plugin development",
+  "description": "Beads plugin marketplace - AI-supervised issue tracker",
   "owner": {
-    "name": "Steve Yegge"
+    "name": "Aarya Reddy"
   },
   "plugins": [
     {
       "name": "beads",
-      "source": "./",
-      "description": "AI-supervised issue tracker for coding workflows",
-      "version": "0.29.0"
+      "source": {
+        "source": "github",
+        "repo": "kraitsura/beads"
+      },
+      "description": "AI-supervised issue tracker for coding workflows with brief output, suggest_next, and improved context control.",
+      "version": "0.30.0"
     }
   ]
 }
