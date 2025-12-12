@@ -1,14 +1,14 @@
 {
   "name": "beads",
   "description": "AI-supervised issue tracker for coding workflows. Manage tasks, discover work, and maintain context with simple CLI commands.",
-  "version": "0.29.0",
+  "version": "0.30.0",
   "author": {
-    "name": "Steve Yegge",
-    "url": "https://github.com/steveyegge"
+    "name": "Aarya Reddy",
+    "url": "https://github.com/kraitsura"
   },
-  "repository": "https://github.com/steveyegge/beads",
+  "repository": "https://github.com/kraitsura/beads",
   "license": "MIT",
-  "homepage": "https://github.com/steveyegge/beads",
+  "homepage": "https://github.com/kraitsura/beads",
   "keywords": [
     "issue-tracker",
     "task-management",
