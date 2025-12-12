@@ -702,7 +702,7 @@ async def close_issue(
 Actions:
 - add: Create dependency (issue depends on depends_on). Types: blocks, related, parent-child, discovered-from
 - remove: Remove dependency
-- tree: Show dependency tree (use brief=True for minimal output)
+- tree: Show dependency tree (use brief=True for minimal output, reverse=True for children)
 
 Examples:
 - dep(action="add", issue_id="bd-1", depends_on_id="bd-2")
@@ -715,6 +715,7 @@ async def dep(
     depends_on_id: str | None = None,
     dep_type: DependencyType = "blocks",
     max_depth: int = 3,
+    reverse: bool = True,  # True=show children/dependents, False=show blockers/dependencies
     brief: bool = False,
     verbose: bool = False,
     workspace_root: str | None = None,
@@ -746,7 +747,7 @@ async def dep(
         return OperationResult(id=f"{issue_id}->{depends_on_id}", action="dep_removed")
 
     elif action == "tree":
-        tree_data = await beads_dep_tree(issue_id=issue_id, max_depth=max_depth)
+        tree_data = await beads_dep_tree(issue_id=issue_id, max_depth=max_depth, reverse=reverse)
         if brief and isinstance(tree_data, list):
             return [
                 BriefTreeNode(

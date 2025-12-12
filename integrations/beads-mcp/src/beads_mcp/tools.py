@@ -556,14 +556,16 @@ async def beads_remove_dependency(
 async def beads_dep_tree(
     issue_id: Annotated[str, "Issue ID to get dependency tree for"],
     max_depth: Annotated[int, "Maximum depth to traverse (1-10)"] = 3,
+    reverse: Annotated[bool, "True=show dependents (children), False=show dependencies (blockers)"] = True,
 ) -> dict[str, Any]:
     """Get the dependency tree for an issue.
 
-    Shows what this issue depends on (blockers) and what depends on it.
-    Useful for understanding blocking chains.
+    By default (reverse=True), shows what depends on this issue (children/dependents).
+    With reverse=False, shows what this issue depends on (blockers).
+    Useful for understanding blocking chains and work hierarchies.
     """
     client = await _get_client()
-    params = DepTreeParams(issue_id=issue_id, max_depth=max_depth)
+    params = DepTreeParams(issue_id=issue_id, max_depth=max_depth, reverse=reverse)
     return await client.dep_tree(params)
 
 

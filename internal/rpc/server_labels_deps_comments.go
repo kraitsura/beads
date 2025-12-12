@@ -109,7 +109,7 @@ func (s *Server) handleDepTree(req *Request) Response {
 	}
 
 	ctx := s.reqCtx(req)
-	tree, err := store.GetDependencyTree(ctx, treeArgs.ID, maxDepth, false, false)
+	tree, err := store.GetDependencyTree(ctx, treeArgs.ID, maxDepth, false, treeArgs.Reverse)
 	if err != nil {
 		return Response{
 			Success: false,

@@ -581,6 +581,7 @@ class BdDaemonClient(BdClientBase):
         args = {
             "id": params.issue_id,
             "max_depth": params.max_depth,
+            "reverse": params.reverse,
         }
         data = await self._send_request("dep_tree", args)
 

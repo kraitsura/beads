@@ -218,6 +218,7 @@ type DepRemoveArgs struct {
 type DepTreeArgs struct {
 	ID       string `json:"id"`
 	MaxDepth int    `json:"max_depth,omitempty"`
+	Reverse  bool   `json:"reverse,omitempty"` // true=show dependents (children), false=show dependencies (blockers)
 }
 
 // BlockedArgs represents arguments for the blocked operation

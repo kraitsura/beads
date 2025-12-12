@@ -170,6 +170,7 @@ class DepTreeParams(BaseModel):
 
     issue_id: str
     max_depth: int = Field(default=3, ge=1, le=10)
+    reverse: bool = Field(default=True)  # True=show dependents (children), False=show dependencies (blockers)
 
 
 class CommentAddParams(BaseModel):
