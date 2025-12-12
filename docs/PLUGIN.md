@@ -99,20 +99,116 @@ After installation, restart Claude Code to activate the MCP server.
 
 The plugin includes a full-featured MCP server with these tools:
 
+### Issue Management
+
 - **`init`** - Initialize bd in current directory
 - **`create`** - Create new issue (bug, feature, task, epic, chore)
-- **`list`** - List issues with filters (status, priority, type, assignee)
+- **`update`** - Update issue (status, priority, labels, time estimate, etc.)
+- **`close`** - Close completed issue (`suggest_next=True` shows newly unblocked issues)
+- **`reopen`** - Reopen closed issues
+
+### Querying
+
+- **`list`** - List issues with filters (status, priority, type, assignee, labels, query)
 - **`ready`** - Find tasks with no blockers ready to work on
 - **`show`** - Show detailed issue info including dependencies
-- **`update`** - Update issue (status, priority, design, notes, etc)
-- **`close`** - Close completed issue
-- **`dep`** - Add dependency (blocks, related, parent-child, discovered-from)
 - **`blocked`** - Get blocked issues
 - **`stats`** - Get project statistics
+
+### Dependencies
+
+- **`dep`** - Add dependency (blocks, related, parent-child, discovered-from)
+- **`dep_remove`** - Remove a dependency
+- **`dep_tree`** - Visualize full dependency chain
+
+### Comments
+
+- **`comment_add`** - Add a comment to track progress or decisions
+- **`comment_list`** - List comments on an issue
 
 ### MCP Resources
 
 - **`beads://quickstart`** - Interactive quickstart guide
+
+## Context Control (Token Optimization)
+
+The MCP tools support parameters to minimize response size:
+
+### For Read Operations (`list`, `ready`, `show`)
+
+- **`brief=True`** - Returns only `{id, title, status}` for scanning
+- **`fields=["id", "dependencies"]`** - Select specific fields to return
+- **`max_description_length=100`** - Truncate long descriptions
+
+**Examples:**
+```python
+# Find issue by name (minimal output)
+list(query="auth", brief=True)
+
+# Check dependencies only
+show(issue_id, fields=["id", "dependencies"])
+
+# Quick status overview
+ready(brief=True, limit=5)
+```
+
+### Filtering Parameters
+
+- **`labels=["bug"]`** - Must have ALL specified labels (AND semantics)
+- **`labels_any=["p0", "p1"]`** - Must have at least one label (OR semantics)
+- **`query="search term"`** - Search in title/description
+- **`unassigned=True`** - Filter for issues with no assignee
+- **`sort_policy="priority"|"oldest"|"hybrid"`** - For `ready()` sorting
+
+### Brief Output (Default for Write Operations)
+
+Write operations (`create`, `update`, `close`, `reopen`, `dep`, `dep_remove`, `comment_add`) return minimal confirmations by default:
+
+```json
+{"ok": true, "id": "bd-123", "action": "created"}
+```
+
+Use `verbose=True` to get full object details when needed:
+```python
+create(title="Fix bug", verbose=True)  # Returns full Issue object
+update(issue_id, status="in_progress", verbose=True)  # Returns updated Issue
+```
+
+### Suggest Next (Close)
+
+When closing an issue, use `suggest_next=True` to see what issues become unblocked:
+
+```python
+close(issue_id, suggest_next=True)
+# Returns: {"ok": true, "id": "bd-1", "action": "closed", "message": "Unblocked: [{'id': 'bd-2', 'title': '...'}]"}
+```
+
+This only shows direct dependents (level 1) that are now ready to work on.
+
+## Label Management
+
+Modify labels without replacing all existing labels:
+
+```python
+# Add labels
+update(issue_id, add_labels=["bug", "urgent"])
+
+# Remove labels
+update(issue_id, remove_labels=["wontfix"])
+
+# Filter by labels
+list(labels=["bug"])  # Must have ALL (AND)
+list(labels_any=["p0", "p1"])  # Must have at least one (OR)
+ready(unassigned=True, labels=["bug"])  # Unassigned bugs ready to work on
+```
+
+## Time Estimates
+
+Track estimated work time:
+
+```python
+update(issue_id, estimated_minutes=60)  # 1 hour estimate
+```
 
 ## Workflow
 
