@@ -106,7 +106,7 @@ var quickstartCmd = &cobra.Command{
 
 		fmt.Printf("%s\n", bold("MCP BRIEF OUTPUT (DEFAULT)"))
 		fmt.Printf("  Write operations return minimal confirmations by default:\n")
-		fmt.Printf("    %s\n", cyan("{\"ok\": true, \"id\": \"bd-1\", \"action\": \"created\"}"))
+		fmt.Printf("    %s\n", cyan("{\"id\": \"bd-1\", \"action\": \"created\"}"))
 		fmt.Printf("  Use %s for full object details when needed.\n\n", cyan("verbose=True"))
 
 		fmt.Printf("%s\n", bold("MCP SUGGEST NEXT"))

@@ -22,6 +22,7 @@ const (
 	OpDepAdd          = "dep_add"
 	OpDepRemove       = "dep_remove"
 	OpDepTree         = "dep_tree"
+	OpBlocked         = "blocked"
 	OpLabelAdd        = "label_add"
 	OpLabelRemove     = "label_remove"
 	OpCommentList     = "comment_list"
@@ -218,6 +219,10 @@ type DepTreeArgs struct {
 	ID       string `json:"id"`
 	MaxDepth int    `json:"max_depth,omitempty"`
 }
+
+// BlockedArgs represents arguments for the blocked operation
+// No arguments needed - returns all blocked issues
+type BlockedArgs struct{}
 
 // LabelAddArgs represents arguments for adding a label
 type LabelAddArgs struct {
