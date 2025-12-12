@@ -343,6 +343,16 @@ func (c *Client) RemoveDependency(args *DepRemoveArgs) (*Response, error) {
 	return c.Execute(OpDepRemove, args)
 }
 
+// DepTree retrieves the dependency tree for an issue via the daemon
+func (c *Client) DepTree(args *DepTreeArgs) (*Response, error) {
+	return c.Execute(OpDepTree, args)
+}
+
+// GetBlocked retrieves blocked issues via the daemon
+func (c *Client) GetBlocked(args *BlockedArgs) (*Response, error) {
+	return c.Execute(OpBlocked, args)
+}
+
 // AddLabel adds a label via the daemon
 func (c *Client) AddLabel(args *LabelAddArgs) (*Response, error) {
 	return c.Execute(OpLabelAdd, args)

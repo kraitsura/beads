@@ -97,34 +97,28 @@ After installation, restart Claude Code to activate the MCP server.
 
 ## MCP Tools Available
 
-The plugin includes a full-featured MCP server with these tools:
+The plugin includes 11 consolidated MCP tools optimized for token efficiency:
 
-### Issue Management
+### Core Tools
 
-- **`init`** - Initialize bd in current directory
-- **`create`** - Create new issue (bug, feature, task, epic, chore)
-- **`update`** - Update issue (status, priority, labels, time estimate, etc.)
-- **`close`** - Close completed issue (`suggest_next=True` shows newly unblocked issues)
-- **`reopen`** - Reopen closed issues
+| Tool | Description |
+|------|-------------|
+| **`ready`** | Find tasks with no blockers ready to work on |
+| **`list`** | List issues with filters. Use `status="blocked"` to see blocked issues with `blocked_by` info |
+| **`show`** | Show detailed issue info including dependencies |
+| **`create`** | Create new issue (bug, feature, task, epic, chore) |
+| **`update`** | Update issue (status, priority, labels, time estimate, etc.) |
+| **`close`** | Close or reopen issues. `action="close"` (default) or `action="reopen"` |
+| **`stats`** | Get project statistics |
 
-### Querying
+### Consolidated Action Tools
 
-- **`list`** - List issues with filters (status, priority, type, assignee, labels, query)
-- **`ready`** - Find tasks with no blockers ready to work on
-- **`show`** - Show detailed issue info including dependencies
-- **`blocked`** - Get blocked issues
-- **`stats`** - Get project statistics
-
-### Dependencies
-
-- **`dep`** - Add dependency (blocks, related, parent-child, discovered-from)
-- **`dep_remove`** - Remove a dependency
-- **`dep_tree`** - Visualize full dependency chain
-
-### Comments
-
-- **`comment_add`** - Add a comment to track progress or decisions
-- **`comment_list`** - List comments on an issue
+| Tool | Actions | Examples |
+|------|---------|----------|
+| **`dep`** | `add`, `remove`, `tree` | `dep(action="add", issue_id="bd-1", depends_on_id="bd-2")` |
+| **`comment`** | `add`, `list` | `comment(action="add", issue_id="bd-1", text="...")` |
+| **`context`** | `set`, `show`, `init` | `context(action="set", workspace_root="...")` |
+| **`admin`** | `validate`, `repair`, `schema`, `debug`, `migration`, `pollution` | `admin(action="validate")` |
 
 ### MCP Resources
 
@@ -162,16 +156,17 @@ ready(brief=True, limit=5)
 
 ### Brief Output (Default for Write Operations)
 
-Write operations (`create`, `update`, `close`, `reopen`, `dep`, `dep_remove`, `comment_add`) return minimal confirmations by default:
+Write operations (`create`, `update`, `close`, `dep`, `comment`) return minimal confirmations by default:
 
 ```json
-{"ok": true, "id": "bd-123", "action": "created"}
+{"id": "bd-123", "action": "created"}
 ```
 
 Use `verbose=True` to get full object details when needed:
 ```python
 create(title="Fix bug", verbose=True)  # Returns full Issue object
 update(issue_id, status="in_progress", verbose=True)  # Returns updated Issue
+close(issue_id, verbose=True)  # Returns closed Issue
 ```
 
 ### Suggest Next (Close)
@@ -180,7 +175,7 @@ When closing an issue, use `suggest_next=True` to see what issues become unblock
 
 ```python
 close(issue_id, suggest_next=True)
-# Returns: {"ok": true, "id": "bd-1", "action": "closed", "message": "Unblocked: [{'id': 'bd-2', 'title': '...'}]"}
+# Returns: {"id": "bd-1", "action": "closed", "message": "Unblocked: [{'id': 'bd-2', 'title': '...'}]"}
 ```
 
 This only shows direct dependents (level 1) that are now ready to work on.
@@ -339,7 +334,7 @@ To customize, edit your Claude Code MCP settings or the plugin configuration.
 /bd-create "Add rate limiting to API" feature 2
 
 # Link it to current work (via MCP tool)
-# Use `dep` tool: issue="bd-11", depends_on="bd-10", type="discovered-from"
+# Use: dep(action="add", issue_id="bd-11", depends_on_id="bd-10", dep_type="discovered-from")
 
 # Close original task
 /bd-close bd-10 "Done, discovered bd-11 for rate limiting"

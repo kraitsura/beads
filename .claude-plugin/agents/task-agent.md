@@ -75,7 +75,7 @@ Via beads MCP server:
 - `stats` - View project stats
 
 **Output Control:**
-- Default: Write operations return `{"ok": true, "id": "...", "action": "..."}`
+- Default: Write operations return `{"id": "...", "action": "..."}`
 - Use `verbose=True` for full object details
 
 You are autonomous but should communicate your progress clearly. Start by finding ready work!

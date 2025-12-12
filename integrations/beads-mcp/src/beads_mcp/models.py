@@ -64,16 +64,31 @@ class BriefIssue(BaseModel):
     status: IssueStatus
 
 
+class BriefTreeNode(BaseModel):
+    """Minimal tree node for dependency visualization.
+
+    Used when `brief=True` in dep(action="tree") to reduce context size.
+    ~30 bytes per node vs ~1-2KB for full TreeNode.
+    """
+    id: str
+    title: str
+    status: IssueStatus
+    depth: int
+    truncated: bool = False
+
+
 class OperationResult(BaseModel):
     """Brief confirmation for write operations.
 
     Returned by default (verbose=False) to minimize context usage.
     Use verbose=True to get full object details.
+
+    Format: {"id": "bd-1", "action": "created"} or with message for suggest_next.
+    Errors are raised as exceptions, not returned here.
     """
-    ok: bool = True
     id: str  # Issue ID affected (or "bd-1->bd-2" for deps)
     action: str  # "created", "updated", "closed", "reopened", "dep_added", etc.
-    message: str | None = None  # Optional details
+    message: str | None = None  # Optional details (e.g., unblocked issues)
 
 
 class Dependency(BaseModel):

@@ -14,7 +14,7 @@ from typing import Any, Awaitable, Callable, TypeVar
 
 from fastmcp import FastMCP
 
-from beads_mcp.models import BlockedIssue, BriefIssue, DependencyType, Issue, IssueStatus, IssueType, OperationResult, Stats
+from beads_mcp.models import BlockedIssue, BriefIssue, BriefTreeNode, DependencyType, Issue, IssueStatus, IssueType, OperationResult, Stats
 from beads_mcp.tools import (
     beads_add_dependency,
     beads_blocked,
@@ -65,69 +65,43 @@ mcp = FastMCP(
 We track work in Beads (bd) instead of Markdown.
 Check the resource beads://quickstart to see how.
 
-IMPORTANT: Call set_context with your workspace root before any write operations.
+IMPORTANT: Call context(action="set", workspace_root="...") before write operations.
 
-## Context Control (Reduce Token Usage)
+## Quick Reference (11 tools)
 
-When scanning or searching issues, use these parameters to minimize response size:
+| Action | Tool | Example |
+|--------|------|---------|
+| Find work | ready(brief=True) | Scan available tasks |
+| List/search | list(query="auth", brief=True) | Search issues |
+| Blocked issues | list(status="blocked") | Shows blocked_by info |
+| Issue detail | show(id, fields=["id","dependencies"]) | Check specific issue |
+| Create | create(title="...") | New issue |
+| Update | update(id, status="in_progress") | Claim work |
+| Close/reopen | close(id) / close(action="reopen", issue_ids=[...]) | Complete/reopen |
+| Dependencies | dep(action="add|remove|tree", ...) | Manage deps |
+| Comments | comment(action="add|list", ...) | Track progress |
+| Statistics | stats() | Project overview |
+| Admin | admin(action="validate|repair|...", ...) | Diagnostics |
+| Context | context(action="set|show|init", ...) | Workspace setup |
 
-- `brief=True`: Returns only {id, title, status} - use when scanning for an issue
-- `fields=["id", "dependencies"]`: Returns only specific fields - use when checking deps
-- `max_description_length=100`: Truncates long descriptions - use for overviews
+## Token Optimization
 
-Examples:
-- Finding an issue by name: `list(query="auth", brief=True)`
-- Checking what blocks an issue: `show(issue_id, fields=["id", "dependencies"])`
-- Quick status check: `ready(brief=True, limit=5)`
+- `brief=True`: Returns only {id, title, status} - use when scanning
+- `fields=["id", "dependencies"]`: Returns only specific fields
+- `max_description_length=100`: Truncates long descriptions
+- Write ops return minimal confirmation by default (use `verbose=True` for full)
+- `dep(action="tree", brief=True)`: Compact dependency tree
 
 ## Filtering Issues
-
-Use scoping parameters to narrow results:
 
 - `labels=["bug"]`: Issues with ALL specified labels (AND)
 - `labels_any=["p0", "p1"]`: Issues with ANY specified label (OR)
 - `query="search term"`: Search in title/description
 - `unassigned=True`: Issues with no assignee
-- `sort_policy="priority"|"oldest"|"hybrid"`: For ready() sorting
-
-## Dependency Management
-
-- `dep(issue_id, depends_on_id)`: Add blocker
-- `dep_remove(issue_id, depends_on_id)`: Remove blocker
-- `dep_tree(issue_id)`: See full dependency chain
-
-## Labels via Update
-
-Modify labels without replacing all:
-- `update(issue_id, add_labels=["bug"])`: Add labels
-- `update(issue_id, remove_labels=["wontfix"])`: Remove labels
-
-## Comments
-
-Track decisions and progress:
-- `comment_add(issue_id, "Discovered root cause: ...")`: Add note
-- `comment_list(issue_id)`: Review discussion
-
-## Brief Output (Default for Write Operations)
-
-Write operations (`create`, `update`, `close`, `reopen`, `dep`, `dep_remove`, `comment_add`)
-return minimal confirmations by default to save context:
-
-```json
-{"ok": true, "id": "bd-123", "action": "created"}
-```
-
-Use `verbose=True` to get full object details when needed:
-- `create(..., verbose=True)` - Returns full Issue object
-- `update(..., verbose=True)` - Returns updated Issue
-- `close(..., verbose=True)` - Returns closed Issue(s)
 
 ## Suggest Next (Close)
 
-Use `close(issue_id, suggest_next=True)` to see issues unblocked by this close:
-```json
-{"ok": true, "id": "bd-1", "action": "closed", "message": "Unblocked: [{'id': 'bd-2', 'title': '...'}]"}
-```
+Use `close(issue_id, suggest_next=True)` to see issues unblocked by this close.
 """,
 )
 
@@ -307,100 +281,100 @@ async def get_quickstart() -> str:
 
 # Context management tools
 @mcp.tool(
-    name="set_context",
-    description="Set the workspace root directory for all bd operations. Call this first!",
+    name="context",
+    description="""Manage workspace context.
+Actions:
+- set: Set workspace root directory (required before write operations)
+- show: Show current workspace context and database path
+- init: Initialize new beads database (creates .beads/ directory)""",
 )
-async def set_context(workspace_root: str) -> str:
-    """Set workspace root directory and discover the beads database.
+async def context(
+    action: str,  # "set", "show", "init"
+    workspace_root: str | None = None,
+    prefix: str | None = None,
+) -> str:
+    """Manage workspace context."""
 
-    Args:
-        workspace_root: Absolute path to workspace/project root directory
+    if action == "set":
+        if not workspace_root:
+            raise ValueError("workspace_root required for set action")
 
-    Returns:
-        Confirmation message with resolved paths
-    """
-    # Resolve to git repo root if possible (run in thread to avoid blocking event loop)
-    try:
-        resolved_root = await asyncio.wait_for(
-            asyncio.to_thread(_resolve_workspace_root, workspace_root),
-            timeout=5.0,  # Longer timeout to handle slow git operations
-        )
-    except asyncio.TimeoutError:
-        logger.error(f"Git detection timed out after 5s for: {workspace_root}")
-        return (
-            f"Error: Git repository detection timed out.\n"
-            f"  Provided path: {workspace_root}\n"
-            f"  This may indicate a slow filesystem or git configuration issue.\n"
-            f"  Please ensure the path is correct and git is responsive."
-        )
+        # Resolve to git repo root if possible
+        try:
+            resolved_root = await asyncio.wait_for(
+                asyncio.to_thread(_resolve_workspace_root, workspace_root),
+                timeout=5.0,
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"Git detection timed out after 5s for: {workspace_root}")
+            return (
+                f"Error: Git repository detection timed out.\n"
+                f"  Provided path: {workspace_root}\n"
+                f"  This may indicate a slow filesystem or git configuration issue."
+            )
 
-    # Store in persistent context (survives across MCP tool calls)
-    _workspace_context["BEADS_WORKING_DIR"] = resolved_root
-    _workspace_context["BEADS_CONTEXT_SET"] = "1"
+        # Store in persistent context
+        _workspace_context["BEADS_WORKING_DIR"] = resolved_root
+        _workspace_context["BEADS_CONTEXT_SET"] = "1"
+        os.environ["BEADS_WORKING_DIR"] = resolved_root
+        os.environ["BEADS_CONTEXT_SET"] = "1"
 
-    # Also set in os.environ for compatibility
-    os.environ["BEADS_WORKING_DIR"] = resolved_root
-    os.environ["BEADS_CONTEXT_SET"] = "1"
+        # Find beads database
+        db_path = _find_beads_db(resolved_root)
 
-    # Find beads database
-    db_path = _find_beads_db(resolved_root)
+        if db_path is None:
+            _workspace_context.pop("BEADS_DB", None)
+            os.environ.pop("BEADS_DB", None)
+            return (
+                f"Context set successfully:\n"
+                f"  Workspace root: {resolved_root}\n"
+                f"  Database: Not found (run context(action='init') to create)"
+            )
 
-    if db_path is None:
-        # Clear any stale DB path
-        _workspace_context.pop("BEADS_DB", None)
-        os.environ.pop("BEADS_DB", None)
+        _workspace_context["BEADS_DB"] = db_path
+        os.environ["BEADS_DB"] = db_path
+
         return (
             f"Context set successfully:\n"
             f"  Workspace root: {resolved_root}\n"
-            f"  Database: Not found (run 'bd init' to create)"
+            f"  Database: {db_path}"
         )
 
-    # Set database path in both persistent context and os.environ
-    _workspace_context["BEADS_DB"] = db_path
-    os.environ["BEADS_DB"] = db_path
+    elif action == "show":
+        context_set = (
+            _workspace_context.get("BEADS_CONTEXT_SET")
+            or os.environ.get("BEADS_CONTEXT_SET")
+        )
 
-    return (
-        f"Context set successfully:\n"
-        f"  Workspace root: {resolved_root}\n"
-        f"  Database: {db_path}"
-    )
+        if not context_set:
+            return (
+                "Context not set. Call context(action='set', workspace_root='...') first.\n"
+                f"Current process CWD: {os.getcwd()}\n"
+                f"BEADS_WORKING_DIR: {_workspace_context.get('BEADS_WORKING_DIR', 'NOT SET')}\n"
+                f"BEADS_DB: {_workspace_context.get('BEADS_DB') or os.environ.get('BEADS_DB', 'NOT SET')}"
+            )
 
+        working_dir = (
+            _workspace_context.get("BEADS_WORKING_DIR")
+            or os.environ.get("BEADS_WORKING_DIR", "NOT SET")
+        )
+        db_path = (
+            _workspace_context.get("BEADS_DB")
+            or os.environ.get("BEADS_DB", "NOT SET")
+        )
+        actor = os.environ.get("BEADS_ACTOR", "NOT SET")
 
-@mcp.tool(
-    name="where_am_i",
-    description="Show current workspace context and database path",
-)
-async def where_am_i(workspace_root: str | None = None) -> str:
-    """Show current workspace context for debugging."""
-    context_set = (
-        _workspace_context.get("BEADS_CONTEXT_SET")
-        or os.environ.get("BEADS_CONTEXT_SET")
-    )
-
-    if not context_set:
         return (
-            "Context not set. Call set_context with your workspace root first.\n"
-            f"Current process CWD: {os.getcwd()}\n"
-            f"BEADS_WORKING_DIR (persistent): {_workspace_context.get('BEADS_WORKING_DIR', 'NOT SET')}\n"
-            f"BEADS_WORKING_DIR (env): {os.environ.get('BEADS_WORKING_DIR', 'NOT SET')}\n"
-            f"BEADS_DB: {_workspace_context.get('BEADS_DB') or os.environ.get('BEADS_DB', 'NOT SET')}"
+            f"Workspace root: {working_dir}\n"
+            f"Database: {db_path}\n"
+            f"Actor: {actor}"
         )
 
-    working_dir = (
-        _workspace_context.get("BEADS_WORKING_DIR")
-        or os.environ.get("BEADS_WORKING_DIR", "NOT SET")
-    )
-    db_path = (
-        _workspace_context.get("BEADS_DB")
-        or os.environ.get("BEADS_DB", "NOT SET")
-    )
-    actor = os.environ.get("BEADS_ACTOR", "NOT SET")
+    elif action == "init":
+        return await beads_init(prefix=prefix)
 
-    return (
-        f"Workspace root: {working_dir}\n"
-        f"Database: {db_path}\n"
-        f"Actor: {actor}"
-    )
+    else:
+        raise ValueError(f"Unknown action: {action}. Use 'set', 'show', or 'init'")
 
 
 # Register all tools
@@ -455,7 +429,7 @@ async def ready_work(
 
 @mcp.tool(
     name="list",
-    description="List all issues with optional filters (status, priority, type, assignee, labels, query).",
+    description="List all issues with optional filters. When status='blocked', returns BlockedIssue with blocked_by info.",
 )
 @with_workspace
 async def list_issues(
@@ -474,8 +448,23 @@ async def list_issues(
     fields: list[str] | None = None,
     max_description_length: int | None = None,
     workspace_root: str | None = None,
-) -> list[Issue] | list[BriefIssue] | list[dict[str, Any]]:
-    """List all issues with optional filters."""
+) -> list[Issue] | list[BriefIssue] | list[BlockedIssue] | list[dict[str, Any]]:
+    """List all issues with optional filters. When status='blocked', includes blocked_by info."""
+
+    # Special handling for blocked status - return BlockedIssue with blocked_by info
+    if status == "blocked":
+        blocked_issues = await beads_blocked()
+        # Apply output control
+        if brief:
+            return [BriefIssue(id=i.id, title=i.title, status=i.status) for i in blocked_issues]
+        if fields:
+            return [{k: getattr(i, k, None) for k in fields if hasattr(i, k)} for i in blocked_issues]
+        if max_description_length:
+            for issue in blocked_issues:
+                if issue.description and len(issue.description) > max_description_length:
+                    issue.description = issue.description[:max_description_length] + "..."
+        return blocked_issues[:limit] if limit else blocked_issues
+
     issues = await beads_list_issues(
         status=status,
         priority=priority,
@@ -638,20 +627,39 @@ async def update_issue(
 
 @mcp.tool(
     name="close",
-    description="""Close (complete) an issue. Mark work as done when you've finished implementing/fixing it.
-Returns brief confirmation by default; use verbose=True for full Issue.
-Use suggest_next=True to see issues unblocked by this close (level 1 dependents only).""",
+    description="""Close or reopen issues.
+- action="close" (default): Mark issue complete. Use suggest_next=True to see unblocked issues.
+- action="reopen": Reopen closed issues (use issue_ids for multiple).
+Returns brief confirmation by default; use verbose=True for full Issue.""",
 )
 @with_workspace
 @require_context
 async def close_issue(
-    issue_id: str,
+    issue_id: str | None = None,
+    issue_ids: list[str] | None = None,
+    action: str = "close",  # "close" or "reopen"
     reason: str = "Completed",
     verbose: bool = False,
     suggest_next: bool = False,
     workspace_root: str | None = None,
 ) -> list[Issue] | OperationResult:
-    """Close (complete) an issue."""
+    """Close or reopen issues."""
+
+    # Handle reopen action
+    if action == "reopen":
+        ids_to_reopen = issue_ids or ([issue_id] if issue_id else [])
+        if not ids_to_reopen:
+            raise ValueError("issue_id or issue_ids required for reopen action")
+        issues = await beads_reopen_issue(issue_ids=ids_to_reopen, reason=reason if reason != "Completed" else None)
+        if verbose:
+            return issues
+        ids_str = ", ".join(ids_to_reopen)
+        return OperationResult(id=ids_str, action="reopened", message=f"{len(issues)} issue(s)")
+
+    # Handle close action (default)
+    if not issue_id:
+        raise ValueError("issue_id required for close action")
+
     # Get dependents BEFORE closing if suggest_next requested
     dependents = []
     if suggest_next:
@@ -689,123 +697,104 @@ async def close_issue(
 
 
 @mcp.tool(
-    name="reopen",
-    description="""Reopen one or more closed issues. Sets status to 'open' and clears closed_at timestamp.
-Returns brief confirmation by default; use verbose=True for full Issue list.""",
-)
-@with_workspace
-@require_context
-async def reopen_issue(
-    issue_ids: list[str],
-    reason: str | None = None,
-    verbose: bool = False,
-    workspace_root: str | None = None,
-) -> list[Issue] | OperationResult:
-    """Reopen one or more closed issues."""
-    issues = await beads_reopen_issue(issue_ids=issue_ids, reason=reason)
-    if verbose:
-        return issues
-    ids = ", ".join(issue_ids)
-    return OperationResult(id=ids, action="reopened", message=f"{len(issues)} issue(s)")
-
-
-@mcp.tool(
     name="dep",
-    description="""Add a dependency between issues. Types: blocks (hard blocker),
-related (soft link), parent-child (epic/subtask), discovered-from (found during work).
-Returns brief confirmation by default; use verbose=True for full message.""",
+    description="""Manage dependencies between issues.
+Actions:
+- add: Create dependency (issue depends on depends_on). Types: blocks, related, parent-child, discovered-from
+- remove: Remove dependency
+- tree: Show dependency tree (use brief=True for minimal output)
+
+Examples:
+- dep(action="add", issue_id="bd-1", depends_on_id="bd-2")
+- dep(action="tree", issue_id="bd-1", brief=True)""",
 )
 @with_workspace
-@require_context
-async def add_dependency(
+async def dep(
+    action: str,  # "add", "remove", "tree"
     issue_id: str,
-    depends_on_id: str,
+    depends_on_id: str | None = None,
     dep_type: DependencyType = "blocks",
-    verbose: bool = False,
-    workspace_root: str | None = None,
-) -> str | OperationResult:
-    """Add a dependency relationship between two issues."""
-    result = await beads_add_dependency(
-        issue_id=issue_id,
-        depends_on_id=depends_on_id,
-        dep_type=dep_type,
-    )
-    if verbose:
-        return result
-    return OperationResult(id=f"{issue_id}->{depends_on_id}", action="dep_added")
-
-
-@mcp.tool(
-    name="dep_remove",
-    description="""Remove a dependency between issues.
-Returns brief confirmation by default; use verbose=True for full message.""",
-)
-@with_workspace
-@require_context
-async def remove_dependency(
-    issue_id: str,
-    depends_on_id: str,
-    dep_type: DependencyType | None = None,
-    verbose: bool = False,
-    workspace_root: str | None = None,
-) -> str | OperationResult:
-    """Remove a dependency relationship between two issues."""
-    result = await beads_remove_dependency(
-        issue_id=issue_id,
-        depends_on_id=depends_on_id,
-        dep_type=dep_type,
-    )
-    if verbose:
-        return result
-    return OperationResult(id=f"{issue_id}->{depends_on_id}", action="dep_removed")
-
-
-@mcp.tool(
-    name="dep_tree",
-    description="Get the dependency tree for an issue, showing blockers and dependents.",
-)
-@with_workspace
-async def dep_tree(
-    issue_id: str,
     max_depth: int = 3,
+    brief: bool = False,
+    verbose: bool = False,
     workspace_root: str | None = None,
-) -> dict[str, Any]:
-    """Get dependency tree for an issue."""
-    return await beads_dep_tree(issue_id=issue_id, max_depth=max_depth)
+) -> OperationResult | list[dict[str, Any]] | list[BriefTreeNode] | str:
+    """Manage dependencies between issues."""
+
+    if action == "add":
+        if not depends_on_id:
+            raise ValueError("depends_on_id required for add action")
+        result = await beads_add_dependency(
+            issue_id=issue_id,
+            depends_on_id=depends_on_id,
+            dep_type=dep_type,
+        )
+        if verbose:
+            return result
+        return OperationResult(id=f"{issue_id}->{depends_on_id}", action="dep_added")
+
+    elif action == "remove":
+        if not depends_on_id:
+            raise ValueError("depends_on_id required for remove action")
+        result = await beads_remove_dependency(
+            issue_id=issue_id,
+            depends_on_id=depends_on_id,
+            dep_type=dep_type if dep_type != "blocks" else None,
+        )
+        if verbose:
+            return result
+        return OperationResult(id=f"{issue_id}->{depends_on_id}", action="dep_removed")
+
+    elif action == "tree":
+        tree_data = await beads_dep_tree(issue_id=issue_id, max_depth=max_depth)
+        if brief and isinstance(tree_data, list):
+            return [
+                BriefTreeNode(
+                    id=node.get("id", ""),
+                    title=node.get("title", ""),
+                    status=node.get("status", "open"),
+                    depth=node.get("depth", 0),
+                    truncated=node.get("truncated", False),
+                )
+                for node in tree_data
+            ]
+        return tree_data
+
+    else:
+        raise ValueError(f"Unknown action: {action}. Use 'add', 'remove', or 'tree'")
 
 
 @mcp.tool(
-    name="comment_add",
-    description="""Add a comment to an issue for tracking progress or decisions.
-Returns brief confirmation by default; use verbose=True for full comment.""",
+    name="comment",
+    description="""Manage comments on issues.
+Actions:
+- add: Add a comment (requires text parameter)
+- list: List all comments on an issue""",
 )
 @with_workspace
-@require_context
-async def comment_add(
+async def comment(
+    action: str,  # "add" or "list"
     issue_id: str,
-    text: str,
+    text: str | None = None,
     author: str | None = None,
     verbose: bool = False,
     workspace_root: str | None = None,
-) -> dict[str, Any] | OperationResult:
-    """Add a comment to an issue."""
-    result = await beads_comment_add(issue_id=issue_id, text=text, author=author)
-    if verbose:
-        return result
-    return OperationResult(id=issue_id, action="comment_added")
+) -> dict[str, Any] | list[dict[str, Any]] | OperationResult:
+    """Manage comments on issues."""
 
+    if action == "add":
+        if not text:
+            raise ValueError("text required for add action")
+        result = await beads_comment_add(issue_id=issue_id, text=text, author=author)
+        if verbose:
+            return result
+        return OperationResult(id=issue_id, action="comment_added")
 
-@mcp.tool(
-    name="comment_list",
-    description="List all comments on an issue.",
-)
-@with_workspace
-async def comment_list(
-    issue_id: str,
-    workspace_root: str | None = None,
-) -> list[dict[str, Any]]:
-    """List comments on an issue."""
-    return await beads_comment_list(issue_id=issue_id)
+    elif action == "list":
+        return await beads_comment_list(issue_id=issue_id)
+
+    else:
+        raise ValueError(f"Unknown action: {action}. Use 'add' or 'list'")
 
 
 @mcp.tool(
@@ -819,128 +808,56 @@ async def stats(workspace_root: str | None = None) -> Stats:
 
 
 @mcp.tool(
-    name="blocked",
-    description="Get blocked issues showing what dependencies are blocking them from being worked on.",
+    name="admin",
+    description="""Administrative and diagnostic operations.
+Actions:
+- validate: Run database health checks (checks=orphans,duplicates,pollution,conflicts)
+- repair: Fix orphaned dependency references (fix=True to apply)
+- schema: Show database schema info
+- debug: Show environment and working directory info
+- migration: Get migration plan and database state
+- pollution: Detect/clean test issues (clean=True to delete)""",
 )
 @with_workspace
-async def blocked(workspace_root: str | None = None) -> list[BlockedIssue]:
-    """Get blocked issues."""
-    return await beads_blocked()
-
-
-@mcp.tool(
-    name="init",
-    description="""Initialize bd in current directory. Creates .beads/ directory and
-database with optional custom prefix for issue IDs.""",
-)
-@with_workspace
-@require_context
-async def init(prefix: str | None = None, workspace_root: str | None = None) -> str:
-    """Initialize bd in current directory."""
-    return await beads_init(prefix=prefix)
-
-
-@mcp.tool(
-    name="debug_env",
-    description="Debug tool: Show environment and working directory information",
-)
-@with_workspace
-async def debug_env(workspace_root: str | None = None) -> str:
-    """Debug tool to check working directory and environment variables."""
-    info = []
-    info.append("=== Working Directory Debug Info ===\n")
-    info.append(f"os.getcwd(): {os.getcwd()}\n")
-    info.append(f"PWD env var: {os.environ.get('PWD', 'NOT SET')}\n")
-    info.append(f"BEADS_WORKING_DIR env var: {os.environ.get('BEADS_WORKING_DIR', 'NOT SET')}\n")
-    info.append(f"BEADS_PATH env var: {os.environ.get('BEADS_PATH', 'NOT SET')}\n")
-    info.append(f"BEADS_DB env var: {os.environ.get('BEADS_DB', 'NOT SET')}\n")
-    info.append(f"HOME: {os.environ.get('HOME', 'NOT SET')}\n")
-    info.append(f"USER: {os.environ.get('USER', 'NOT SET')}\n")
-    info.append("\n=== All Environment Variables ===\n")
-    for key, value in sorted(os.environ.items()):
-        if not key.startswith("_"):  # Skip internal vars
-            info.append(f"{key}={value}\n")
-    return "".join(info)
-
-
-@mcp.tool(
-    name="inspect_migration",
-    description="Get migration plan and database state for agent analysis.",
-)
-@with_workspace
-async def inspect_migration(workspace_root: str | None = None) -> dict[str, Any]:
-    """Get migration plan and database state for agent analysis.
-    
-    AI agents should:
-    1. Review registered_migrations to understand what will run
-    2. Check warnings array for issues (missing config, version mismatch)
-    3. Verify missing_config is empty before migrating
-    4. Check invariants_to_check to understand safety guarantees
-    
-    Returns migration plan, current db state, warnings, and invariants.
-    """
-    return await beads_inspect_migration()
-
-
-@mcp.tool(
-    name="get_schema_info",
-    description="Get current database schema for inspection.",
-)
-@with_workspace
-async def get_schema_info(workspace_root: str | None = None) -> dict[str, Any]:
-    """Get current database schema for inspection.
-    
-    Returns tables, schema version, config, sample issue IDs, and detected prefix.
-    Useful for verifying database state before migrations.
-    """
-    return await beads_get_schema_info()
-
-
-@mcp.tool(
-    name="repair_deps",
-    description="Find and optionally fix orphaned dependency references.",
-)
-@with_workspace
-async def repair_deps(fix: bool = False, workspace_root: str | None = None) -> dict[str, Any]:
-    """Find and optionally fix orphaned dependency references.
-    
-    Scans all issues for dependencies pointing to non-existent issues.
-    Returns orphaned dependencies and optionally removes them with fix=True.
-    """
-    return await beads_repair_deps(fix=fix)
-
-
-@mcp.tool(
-    name="detect_pollution",
-    description="Detect test issues that leaked into production database.",
-)
-@with_workspace
-async def detect_pollution(clean: bool = False, workspace_root: str | None = None) -> dict[str, Any]:
-    """Detect test issues that leaked into production database.
-    
-    Detects test issues using pattern matching (titles starting with 'test', etc.).
-    Returns detected test issues and optionally deletes them with clean=True.
-    """
-    return await beads_detect_pollution(clean=clean)
-
-
-@mcp.tool(
-    name="validate",
-    description="Run comprehensive database health checks.",
-)
-@with_workspace
-async def validate(
+async def admin(
+    action: str,  # validate, repair, schema, debug, migration, pollution
     checks: str | None = None,
     fix_all: bool = False,
+    fix: bool = False,
+    clean: bool = False,
     workspace_root: str | None = None,
-) -> dict[str, Any]:
-    """Run comprehensive database health checks.
-    
-    Available checks: orphans, duplicates, pollution, conflicts.
-    If checks is None, runs all checks.
-    Returns validation results for each check.
-    """
-    return await beads_validate(checks=checks, fix_all=fix_all)
+) -> dict[str, Any] | str:
+    """Administrative and diagnostic operations."""
+
+    if action == "validate":
+        return await beads_validate(checks=checks, fix_all=fix_all)
+
+    elif action == "repair":
+        return await beads_repair_deps(fix=fix)
+
+    elif action == "schema":
+        return await beads_get_schema_info()
+
+    elif action == "debug":
+        info = []
+        info.append("=== Working Directory Debug Info ===\n")
+        info.append(f"os.getcwd(): {os.getcwd()}\n")
+        info.append(f"PWD env var: {os.environ.get('PWD', 'NOT SET')}\n")
+        info.append(f"BEADS_WORKING_DIR env var: {os.environ.get('BEADS_WORKING_DIR', 'NOT SET')}\n")
+        info.append(f"BEADS_PATH env var: {os.environ.get('BEADS_PATH', 'NOT SET')}\n")
+        info.append(f"BEADS_DB env var: {os.environ.get('BEADS_DB', 'NOT SET')}\n")
+        info.append(f"HOME: {os.environ.get('HOME', 'NOT SET')}\n")
+        info.append(f"USER: {os.environ.get('USER', 'NOT SET')}\n")
+        return "".join(info)
+
+    elif action == "migration":
+        return await beads_inspect_migration()
+
+    elif action == "pollution":
+        return await beads_detect_pollution(clean=clean)
+
+    else:
+        raise ValueError(f"Unknown action: {action}. Use 'validate', 'repair', 'schema', 'debug', 'migration', or 'pollution'")
 
 
 async def async_main() -> None:

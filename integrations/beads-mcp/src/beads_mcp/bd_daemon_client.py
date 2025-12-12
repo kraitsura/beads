@@ -470,13 +470,12 @@ class BdDaemonClient(BdClientBase):
 
         Returns:
             List of blocked issues with their blockers
-
-        Note:
-            This operation may not be implemented in daemon RPC yet
         """
-        # Note: blocked operation may not be in RPC protocol yet
-        # This is a placeholder for when it's added
-        raise NotImplementedError("Blocked operation not yet supported via daemon")
+        data = await self._send_request("blocked", {})
+        result = json.loads(data) if isinstance(data, str) else data
+        if result is None:
+            return []
+        return [BlockedIssue.model_validate(issue) for issue in result] if isinstance(result, list) else []
 
     async def inspect_migration(self) -> dict[str, Any]:
         """Get migration plan and database state for agent analysis.
@@ -570,21 +569,33 @@ class BdDaemonClient(BdClientBase):
             args["dep_type"] = params.dep_type
         await self._send_request("dep_remove", args)
 
-    async def dep_tree(self, params: DepTreeParams) -> Dict[str, Any]:
+    async def dep_tree(self, params: DepTreeParams) -> List[Dict[str, Any]]:
         """Get dependency tree for an issue.
 
         Args:
             params: Dep tree parameters
 
         Returns:
-            Dependency tree data
+            Dependency tree data (list of TreeNode objects)
         """
         args = {
             "id": params.issue_id,
             "max_depth": params.max_depth,
         }
         data = await self._send_request("dep_tree", args)
-        return json.loads(data) if isinstance(data, str) else data
+
+        # Handle JSON parsing with error recovery
+        if isinstance(data, str):
+            try:
+                result = json.loads(data)
+            except json.JSONDecodeError:
+                # Return empty list on parse failure
+                return []
+        else:
+            result = data
+
+        # Ensure we return a list (tree nodes) or empty list
+        return result if isinstance(result, list) else []
 
     async def comment_add(self, params: CommentAddParams) -> Dict[str, Any]:
         """Add a comment to an issue.

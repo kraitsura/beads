@@ -85,6 +85,70 @@ func (s *Server) handleDepRemove(req *Request) Response {
 	}, depArgs.FromID)
 }
 
+func (s *Server) handleDepTree(req *Request) Response {
+	var treeArgs DepTreeArgs
+	if err := json.Unmarshal(req.Args, &treeArgs); err != nil {
+		return Response{
+			Success: false,
+			Error:   fmt.Sprintf("invalid dep_tree args: %v", err),
+		}
+	}
+
+	store := s.storage
+	if store == nil {
+		return Response{
+			Success: false,
+			Error:   "storage not available (global daemon deprecated - use local daemon instead with 'bd daemon' in your project)",
+		}
+	}
+
+	// Default maxDepth to 10 if not specified
+	maxDepth := treeArgs.MaxDepth
+	if maxDepth <= 0 {
+		maxDepth = 10
+	}
+
+	ctx := s.reqCtx(req)
+	tree, err := store.GetDependencyTree(ctx, treeArgs.ID, maxDepth, false, false)
+	if err != nil {
+		return Response{
+			Success: false,
+			Error:   fmt.Sprintf("failed to get dependency tree: %v", err),
+		}
+	}
+
+	data, _ := json.Marshal(tree)
+	return Response{
+		Success: true,
+		Data:    data,
+	}
+}
+
+func (s *Server) handleBlocked(req *Request) Response {
+	store := s.storage
+	if store == nil {
+		return Response{
+			Success: false,
+			Error:   "storage not available (global daemon deprecated - use local daemon instead with 'bd daemon' in your project)",
+		}
+	}
+
+	ctx := s.reqCtx(req)
+	blockedIssues, err := store.GetBlockedIssues(ctx)
+	if err != nil {
+		return Response{
+			Success: false,
+			Error:   fmt.Sprintf("failed to get blocked issues: %v", err),
+		}
+	}
+
+	data, _ := json.Marshal(blockedIssues)
+	return Response{
+		Success: true,
+		Data:    data,
+	}
+}
+
 func (s *Server) handleLabelAdd(req *Request) Response {
 	var labelArgs LabelAddArgs
 	return s.handleSimpleStoreOp(req, &labelArgs, "label add", func(ctx context.Context, store storage.Storage, actor string) error {

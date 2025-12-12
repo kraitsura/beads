@@ -165,7 +165,7 @@ func outputMCPContext(w io.Writer, stealthMode bool) error {
 
 ## Brief Output (Default)
 Write operations return minimal confirmations:
-` + "`{\"ok\": true, \"id\": \"bd-123\", \"action\": \"created\"}`" + `
+` + "`{\"id\": \"bd-123\", \"action\": \"created\"}`" + `
 
 Use ` + "`verbose=True`" + ` for full object details when needed.
 
