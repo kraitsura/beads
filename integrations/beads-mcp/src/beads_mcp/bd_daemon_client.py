@@ -12,11 +12,15 @@ from .models import (
     AddDependencyParams,
     BlockedIssue,
     CloseIssueParams,
+    CommentAddParams,
+    CommentListParams,
     CreateIssueParams,
+    DepTreeParams,
     InitParams,
     Issue,
     ListIssuesParams,
     ReadyWorkParams,
+    RemoveDependencyParams,
     ReopenIssueParams,
     ShowIssueParams,
     Stats,
@@ -321,6 +325,14 @@ class BdDaemonClient(BdClientBase):
             args["title"] = params.title
         if params.description is not None:
             args["description"] = params.description
+        # Label operations
+        if params.add_labels:
+            args["add_labels"] = params.add_labels
+        if params.remove_labels:
+            args["remove_labels"] = params.remove_labels
+        # Time estimate
+        if params.estimated_minutes is not None:
+            args["estimated_minutes"] = params.estimated_minutes
 
         data = await self._send_request("update", args)
         return Issue(**(json.loads(data) if isinstance(data, str) else data))
@@ -379,6 +391,15 @@ class BdDaemonClient(BdClientBase):
             args["assignee"] = params.assignee
         if params.limit:
             args["limit"] = params.limit
+        # Scoping parameters
+        if params.labels:
+            args["labels"] = params.labels
+        if params.labels_any:
+            args["labels_any"] = params.labels_any
+        if params.query:
+            args["query"] = params.query
+        if params.unassigned:
+            args["no_assignee"] = True
 
         data = await self._send_request("list", args)
         issues_data = json.loads(data) if isinstance(data, str) else data
@@ -416,6 +437,15 @@ class BdDaemonClient(BdClientBase):
             args["priority"] = params.priority
         if params.limit:
             args["limit"] = params.limit
+        # Scoping parameters
+        if params.labels:
+            args["labels"] = params.labels
+        if params.labels_any:
+            args["labels_any"] = params.labels_any
+        if params.unassigned:
+            args["unassigned"] = True
+        if params.sort_policy:
+            args["sort_policy"] = params.sort_policy
 
         data = await self._send_request("ready", args)
         issues_data = json.loads(data) if isinstance(data, str) else data
@@ -525,6 +555,68 @@ class BdDaemonClient(BdClientBase):
             "dep_type": params.dep_type,
         }
         await self._send_request("dep_add", args)
+
+    async def remove_dependency(self, params: RemoveDependencyParams) -> None:
+        """Remove a dependency between issues.
+
+        Args:
+            params: Dependency removal parameters
+        """
+        args: Dict[str, Any] = {
+            "from_id": params.issue_id,
+            "to_id": params.depends_on_id,
+        }
+        if params.dep_type:
+            args["dep_type"] = params.dep_type
+        await self._send_request("dep_remove", args)
+
+    async def dep_tree(self, params: DepTreeParams) -> Dict[str, Any]:
+        """Get dependency tree for an issue.
+
+        Args:
+            params: Dep tree parameters
+
+        Returns:
+            Dependency tree data
+        """
+        args = {
+            "id": params.issue_id,
+            "max_depth": params.max_depth,
+        }
+        data = await self._send_request("dep_tree", args)
+        return json.loads(data) if isinstance(data, str) else data
+
+    async def comment_add(self, params: CommentAddParams) -> Dict[str, Any]:
+        """Add a comment to an issue.
+
+        Args:
+            params: Comment add parameters
+
+        Returns:
+            Created comment data
+        """
+        args: Dict[str, Any] = {
+            "id": params.issue_id,
+            "text": params.text,
+        }
+        if params.author:
+            args["author"] = params.author
+        data = await self._send_request("comment_add", args)
+        return json.loads(data) if isinstance(data, str) else data
+
+    async def comment_list(self, params: CommentListParams) -> List[Dict[str, Any]]:
+        """List comments on an issue.
+
+        Args:
+            params: Comment list parameters
+
+        Returns:
+            List of comments
+        """
+        args = {"id": params.issue_id}
+        data = await self._send_request("comment_list", args)
+        result = json.loads(data) if isinstance(data, str) else data
+        return result if isinstance(result, list) else []
 
     async def is_daemon_running(self) -> bool:
         """Check if daemon is running.
