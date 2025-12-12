@@ -41,6 +41,7 @@ var quickstartCmd = &cobra.Command{
 
 		fmt.Printf("%s\n", bold("MANAGING DEPENDENCIES"))
 		fmt.Printf("  %s     Add dependency (bd-2 blocks bd-1)\n", cyan("bd dep add bd-1 bd-2"))
+		fmt.Printf("  %s  Remove dependency\n", cyan("bd dep remove bd-1 bd-2"))
 		fmt.Printf("  %s  Visualize dependency tree\n", cyan("bd dep tree bd-1"))
 		fmt.Printf("  %s      Detect circular dependencies\n\n", cyan("bd dep cycles"))
 
@@ -58,7 +59,23 @@ var quickstartCmd = &cobra.Command{
 		fmt.Printf("%s\n", bold("UPDATING ISSUES"))
 		fmt.Printf("  %s\n", cyan("bd update bd-1 --status in_progress"))
 		fmt.Printf("  %s\n", cyan("bd update bd-1 --priority 0"))
-		fmt.Printf("  %s\n\n", cyan("bd update bd-1 --assignee bob"))
+		fmt.Printf("  %s\n", cyan("bd update bd-1 --assignee bob"))
+		fmt.Printf("  %s\n\n", cyan("bd update bd-1 --estimate 60"))
+
+		fmt.Printf("%s\n", bold("LABELS"))
+		fmt.Printf("  %s  Add label (keeps existing)\n", cyan("bd update bd-1 --add-label bug"))
+		fmt.Printf("  %s  Remove label\n", cyan("bd update bd-1 --remove-label wontfix"))
+		fmt.Printf("  %s  Filter by label (AND)\n", cyan("bd list --label bug"))
+		fmt.Printf("  %s  Filter by any label (OR)\n\n", cyan("bd list --label-any p0 --label-any p1"))
+
+		fmt.Printf("%s\n", bold("COMMENTS"))
+		fmt.Printf("  %s  Add comment\n", cyan("bd comment add bd-1 \"Found the root cause\""))
+		fmt.Printf("  %s        List comments\n\n", cyan("bd comment list bd-1"))
+
+		fmt.Printf("%s\n", bold("FILTERING & SEARCH"))
+		fmt.Printf("  %s  Search in title\n", cyan("bd list --title \"auth\""))
+		fmt.Printf("  %s     Find unassigned issues\n", cyan("bd list --no-assignee"))
+		fmt.Printf("  %s  Find unassigned ready work\n\n", cyan("bd ready --unassigned"))
 
 		fmt.Printf("%s\n", bold("CLOSING ISSUES"))
 		fmt.Printf("  %s\n", cyan("bd close bd-1"))
@@ -77,6 +94,24 @@ var quickstartCmd = &cobra.Command{
 		fmt.Printf("    • %s shows unblocked work ready to claim\n", cyan("bd ready"))
 		fmt.Printf("    • Use %s flags for programmatic parsing\n", cyan("--json"))
 		fmt.Printf("    • Dependencies prevent agents from duplicating effort\n\n")
+
+		fmt.Printf("%s\n", bold("MCP SERVER FEATURES"))
+		fmt.Printf("  When using the MCP server (mcp__plugin_beads_beads__*):\n")
+		fmt.Printf("    • %s: Returns only {id, title, status} for scanning\n", cyan("brief=True"))
+		fmt.Printf("    • %s: Select specific fields to return\n", cyan("fields=[\"id\", \"deps\"]"))
+		fmt.Printf("    • %s: Truncate long descriptions\n", cyan("max_description_length=100"))
+		fmt.Printf("    • %s: Free-form title/description search\n", cyan("query=\"search term\""))
+		fmt.Printf("    • %s: Add comments to track decisions\n", cyan("comment_add()"))
+		fmt.Printf("    • %s: Reopen closed issues\n\n", cyan("reopen(issue_ids)"))
+
+		fmt.Printf("%s\n", bold("MCP BRIEF OUTPUT (DEFAULT)"))
+		fmt.Printf("  Write operations return minimal confirmations by default:\n")
+		fmt.Printf("    %s\n", cyan("{\"ok\": true, \"id\": \"bd-1\", \"action\": \"created\"}"))
+		fmt.Printf("  Use %s for full object details when needed.\n\n", cyan("verbose=True"))
+
+		fmt.Printf("%s\n", bold("MCP SUGGEST NEXT"))
+		fmt.Printf("  Use %s to see issues unblocked by closing:\n", cyan("suggest_next=True"))
+		fmt.Printf("    %s\n\n", cyan("close(issue_id, suggest_next=True)"))
 
 		fmt.Printf("%s\n", bold("DATABASE EXTENSION"))
 		fmt.Printf("  Applications can extend bd's SQLite database:\n")

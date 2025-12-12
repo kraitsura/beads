@@ -147,6 +147,31 @@ func outputMCPContext(w io.Writer, stealthMode bool) error {
 - Track ALL work in beads (no TodoWrite tool, no markdown TODOs)
 - Use bd MCP tools (mcp__plugin_beads_beads__*), not TodoWrite or markdown
 
+## Context Control (Reduce Token Usage)
+- ` + "`brief=True`" + `: Returns only {id, title, status} - use when scanning
+- ` + "`fields=[\"id\", \"dependencies\"]`" + `: Returns only specific fields
+- ` + "`query=\"search term\"`" + `: Search in title/description
+
+## Filtering
+- ` + "`labels=[\"bug\"]`" + `: Must have ALL labels (AND)
+- ` + "`labels_any=[\"p0\", \"p1\"]`" + `: Must have at least one (OR)
+- ` + "`unassigned=True`" + `: Issues with no assignee
+
+## New Tools
+- ` + "`comment_add(issue_id, text)`" + `: Track decisions/progress
+- ` + "`dep_tree(issue_id)`" + `: See full dependency chain
+- ` + "`dep_remove(issue_id, depends_on_id)`" + `: Remove blocker
+- ` + "`reopen(issue_ids)`" + `: Reopen closed issues
+
+## Brief Output (Default)
+Write operations return minimal confirmations:
+` + "`{\"ok\": true, \"id\": \"bd-123\", \"action\": \"created\"}`" + `
+
+Use ` + "`verbose=True`" + ` for full object details when needed.
+
+## Suggest Next
+` + "`close(issue_id, suggest_next=True)`" + `: Shows issues unblocked by this close.
+
 Start: Check ` + "`ready`" + ` tool for available work.
 `
 	_, _ = fmt.Fprint(w, context)
@@ -246,8 +271,22 @@ bd sync                     # Push to remote
 
 ### Dependencies & Blocking
 - ` + "`bd dep add <issue> <depends-on>`" + ` - Add dependency (issue depends on depends-on)
+- ` + "`bd dep remove <issue> <depends-on>`" + ` - Remove dependency
+- ` + "`bd dep tree <id>`" + ` - Visualize full dependency chain
 - ` + "`bd blocked`" + ` - Show all blocked issues
 - ` + "`bd show <id>`" + ` - See what's blocking/blocked by this issue
+
+### Labels & Comments
+- ` + "`bd update <id> --add-label bug`" + ` - Add label without replacing existing
+- ` + "`bd update <id> --remove-label wontfix`" + ` - Remove specific label
+- ` + "`bd comment add <id> \"Found root cause\"`" + ` - Add comment to track progress
+- ` + "`bd comment list <id>`" + ` - View issue discussion
+
+### Filtering & Search
+- ` + "`bd list --label bug`" + ` - Filter by label (AND: must have ALL)
+- ` + "`bd list --label-any p0 --label-any p1`" + ` - Filter (OR: at least one)
+- ` + "`bd list --title \"search term\"`" + ` - Search in title
+- ` + "`bd ready --unassigned`" + ` - Ready issues with no assignee
 
 ` + syncSection + `
 
