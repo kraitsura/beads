@@ -1,7 +1,7 @@
 """Pydantic models for beads issue tracker types."""
 
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -11,7 +11,25 @@ IssueType = Literal["bug", "feature", "task", "epic", "chore"]
 DependencyType = Literal["blocks", "related", "parent-child", "discovered-from"]
 
 
-class IssueBase(BaseModel):
+class CompactModel(BaseModel):
+    """Base model that excludes None values from serialization.
+
+    This reduces token usage in MCP responses by not outputting
+    meaningless `"field": null` entries.
+    """
+
+    def model_dump(self, **kwargs: Any) -> dict[str, Any]:
+        """Override to exclude None by default."""
+        kwargs.setdefault("exclude_none", True)
+        return super().model_dump(**kwargs)
+
+    def model_dump_json(self, **kwargs: Any) -> str:
+        """Override to exclude None by default."""
+        kwargs.setdefault("exclude_none", True)
+        return super().model_dump_json(**kwargs)
+
+
+class IssueBase(CompactModel):
     """Base issue model with shared fields."""
 
     id: str
@@ -64,12 +82,13 @@ class BriefIssue(BaseModel):
     status: IssueStatus
 
 
-class BriefDep(BaseModel):
+class BriefDep(CompactModel):
     """Minimal dependency representation for show() with brief_deps=True.
 
     Includes dependency_type to understand the relationship.
     ~50 bytes per dep vs ~1-2KB for full Issue object.
     """
+
     id: str
     title: str
     status: IssueStatus
@@ -89,7 +108,7 @@ class BriefTreeNode(BaseModel):
     truncated: bool = False
 
 
-class OperationResult(BaseModel):
+class OperationResult(CompactModel):
     """Brief confirmation for write operations.
 
     Returned by default (verbose=False) to minimize context usage.
@@ -98,6 +117,7 @@ class OperationResult(BaseModel):
     Format: {"id": "bd-1", "action": "created"} or with message for suggest_next.
     Errors are raised as exceptions, not returned here.
     """
+
     id: str  # Issue ID affected (or "bd-1->bd-2" for deps)
     action: str  # "created", "updated", "closed", "reopened", "dep_added", etc.
     message: str | None = None  # Optional details (e.g., unblocked issues)

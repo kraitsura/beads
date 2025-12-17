@@ -468,14 +468,12 @@ class BdDaemonClient(BdClientBase):
     async def blocked(self) -> List[BlockedIssue]:
         """Get blocked issues.
 
-        Returns:
-            List of blocked issues with their blockers
+        Note: Not supported via daemon due to potential large response sizes.
+        Use CLI: bd blocked
         """
-        data = await self._send_request("blocked", {})
-        result = json.loads(data) if isinstance(data, str) else data
-        if result is None:
-            return []
-        return [BlockedIssue.model_validate(issue) for issue in result] if isinstance(result, list) else []
+        raise NotImplementedError(
+            "blocked not supported via daemon - use CLI: bd blocked"
+        )
 
     async def inspect_migration(self) -> dict[str, Any]:
         """Get migration plan and database state for agent analysis.
@@ -572,31 +570,12 @@ class BdDaemonClient(BdClientBase):
     async def dep_tree(self, params: DepTreeParams) -> List[Dict[str, Any]]:
         """Get dependency tree for an issue.
 
-        Args:
-            params: Dep tree parameters
-
-        Returns:
-            Dependency tree data (list of TreeNode objects)
+        Note: Not supported via daemon due to potential large response sizes.
+        Use CLI: bd dep tree <id>
         """
-        args = {
-            "id": params.issue_id,
-            "max_depth": params.max_depth,
-            "reverse": params.reverse,
-        }
-        data = await self._send_request("dep_tree", args)
-
-        # Handle JSON parsing with error recovery
-        if isinstance(data, str):
-            try:
-                result = json.loads(data)
-            except json.JSONDecodeError:
-                # Return empty list on parse failure
-                return []
-        else:
-            result = data
-
-        # Ensure we return a list (tree nodes) or empty list
-        return result if isinstance(result, list) else []
+        raise NotImplementedError(
+            "dep_tree not supported via daemon - use CLI: bd dep tree <id>"
+        )
 
     async def comment_add(self, params: CommentAddParams) -> Dict[str, Any]:
         """Add a comment to an issue.

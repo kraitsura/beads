@@ -14,10 +14,9 @@ from typing import Any, Awaitable, Callable, TypeVar
 
 from fastmcp import FastMCP
 
-from beads_mcp.models import BlockedIssue, BriefDep, BriefIssue, BriefTreeNode, DependencyType, Issue, IssueStatus, IssueType, OperationResult, Stats
+from beads_mcp.models import BriefDep, BriefIssue, BriefTreeNode, DependencyType, Issue, IssueStatus, IssueType, OperationResult, Stats
 from beads_mcp.tools import (
     beads_add_dependency,
-    beads_blocked,
     beads_close_issue,
     beads_comment_add,
     beads_comment_list,
@@ -394,7 +393,7 @@ async def ready_work(
     fields: list[str] | None = None,
     max_description_length: int | None = None,
     workspace_root: str | None = None,
-) -> list[Issue] | list[BriefIssue] | list[dict[str, Any]]:
+):
     """Find issues with no blocking dependencies that are ready to work on."""
     issues = await beads_ready_work(
         limit=limit,
@@ -429,7 +428,7 @@ async def ready_work(
 
 @mcp.tool(
     name="list",
-    description="List all issues with optional filters. When status='blocked', returns BlockedIssue with blocked_by info.",
+    description="""List all issues with optional filters. When status='blocked', returns BlockedIssue with blocked_by info.""",
 )
 @with_workspace
 async def list_issues(
@@ -448,22 +447,8 @@ async def list_issues(
     fields: list[str] | None = None,
     max_description_length: int | None = None,
     workspace_root: str | None = None,
-) -> list[Issue] | list[BriefIssue] | list[BlockedIssue] | list[dict[str, Any]]:
-    """List all issues with optional filters. When status='blocked', includes blocked_by info."""
-
-    # Special handling for blocked status - return BlockedIssue with blocked_by info
-    if status == "blocked":
-        blocked_issues = await beads_blocked()
-        # Apply output control
-        if brief:
-            return [BriefIssue(id=i.id, title=i.title, status=i.status) for i in blocked_issues]
-        if fields:
-            return [{k: getattr(i, k, None) for k in fields if hasattr(i, k)} for i in blocked_issues]
-        if max_description_length:
-            for issue in blocked_issues:
-                if issue.description and len(issue.description) > max_description_length:
-                    issue.description = issue.description[:max_description_length] + "..."
-        return blocked_issues[:limit] if limit else blocked_issues
+):
+    """List all issues with optional filters."""
 
     issues = await beads_list_issues(
         status=status,
@@ -517,7 +502,7 @@ async def show_issue(
     fields: list[str] | None = None,
     max_description_length: int | None = None,
     workspace_root: str | None = None,
-) -> Issue | BriefIssue | dict[str, Any]:
+):
     """Show detailed information about a specific issue."""
     issue = await beads_show_issue(issue_id=issue_id)
 
@@ -591,7 +576,7 @@ async def create_issue(
     deps: list[str] | None = None,
     verbose: bool = False,
     workspace_root: str | None = None,
-) -> Issue | OperationResult:
+):
     """Create a new issue."""
     issue = await beads_create_issue(
         title=title,
@@ -638,7 +623,7 @@ async def update_issue(
     # Output control
     verbose: bool = False,
     workspace_root: str | None = None,
-) -> Issue | list[Issue] | OperationResult | None:
+):
     """Update an existing issue."""
     # If trying to close via update, redirect to close_issue to preserve approval workflow
     if status == "closed":
@@ -684,7 +669,7 @@ async def close_issue(
     verbose: bool = False,
     suggest_next: bool = False,
     workspace_root: str | None = None,
-) -> list[Issue] | OperationResult:
+):
     """Close or reopen issues."""
 
     # Handle reopen action
@@ -757,11 +742,11 @@ async def dep(
     depends_on_id: str | None = None,
     dep_type: DependencyType = "blocks",
     max_depth: int = 3,
-    reverse: bool = True,  # True=show children/dependents, False=show blockers/dependencies
+    reverse: bool = True,  # True=show dependents (children), False=show dependencies (blockers)
     brief: bool = False,
     verbose: bool = False,
     workspace_root: str | None = None,
-) -> OperationResult | list[dict[str, Any]] | list[BriefTreeNode] | str:
+):
     """Manage dependencies between issues."""
 
     if action == "add":
@@ -789,19 +774,25 @@ async def dep(
         return OperationResult(id=f"{issue_id}->{depends_on_id}", action="dep_removed")
 
     elif action == "tree":
-        tree_data = await beads_dep_tree(issue_id=issue_id, max_depth=max_depth, reverse=reverse)
-        if brief and isinstance(tree_data, list):
+        result = await beads_dep_tree(
+            issue_id=issue_id,
+            max_depth=max_depth,
+            reverse=reverse,
+        )
+        if brief:
+            # Convert to minimal format
+            nodes = result.get("nodes", [])
             return [
                 BriefTreeNode(
-                    id=node.get("id", ""),
-                    title=node.get("title", ""),
-                    status=node.get("status", "open"),
-                    depth=node.get("depth", 0),
-                    truncated=node.get("truncated", False),
+                    id=n["id"],
+                    title=n["title"],
+                    status=n["status"],
+                    depth=n.get("depth", 0),
+                    truncated=n.get("truncated", False),
                 )
-                for node in tree_data
+                for n in nodes
             ]
-        return tree_data
+        return result
 
     else:
         raise ValueError(f"Unknown action: {action}. Use 'add', 'remove', or 'tree'")
@@ -822,7 +813,7 @@ async def comment(
     author: str | None = None,
     verbose: bool = False,
     workspace_root: str | None = None,
-) -> dict[str, Any] | list[dict[str, Any]] | OperationResult:
+):
     """Manage comments on issues."""
 
     if action == "add":
@@ -845,7 +836,7 @@ async def comment(
     description="Get statistics: total issues, open, in_progress, closed, blocked, ready, and average lead time.",
 )
 @with_workspace
-async def stats(workspace_root: str | None = None) -> Stats:
+async def stats(workspace_root: str | None = None):
     """Get statistics about tasks."""
     return await beads_stats()
 
@@ -869,7 +860,7 @@ async def admin(
     fix: bool = False,
     clean: bool = False,
     workspace_root: str | None = None,
-) -> dict[str, Any] | str:
+):
     """Administrative and diagnostic operations."""
 
     if action == "validate":
