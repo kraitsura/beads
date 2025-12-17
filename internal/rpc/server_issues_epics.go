@@ -986,6 +986,19 @@ func (s *Server) handleReady(req *Request) Response {
 		}
 	}
 
+	// Apply review status filters server-side for efficiency
+	if readyArgs.ApprovedOnly || readyArgs.UnreviewedOnly {
+		var filtered []*types.Issue
+		for _, issue := range issues {
+			if readyArgs.ApprovedOnly && issue.ReviewStatus == types.ReviewStatusApproved {
+				filtered = append(filtered, issue)
+			} else if readyArgs.UnreviewedOnly && (issue.ReviewStatus == "" || issue.ReviewStatus == types.ReviewStatusUnreviewed) {
+				filtered = append(filtered, issue)
+			}
+		}
+		issues = filtered
+	}
+
 	data, _ := json.Marshal(issues)
 	return Response{
 		Success: true,
