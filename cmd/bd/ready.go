@@ -20,7 +20,15 @@ var readyCmd = &cobra.Command{
 		sortPolicy, _ := cmd.Flags().GetString("sort")
 		labels, _ := cmd.Flags().GetStringSlice("label")
 		labelsAny, _ := cmd.Flags().GetStringSlice("label-any")
+		approvedOnly, _ := cmd.Flags().GetBool("approved-only")
+		unreviewedOnly, _ := cmd.Flags().GetBool("unreviewed-only")
 		// Use global jsonOutput set by PersistentPreRun (respects config.yaml + env vars)
+
+		// Validate mutually exclusive flags
+		if approvedOnly && unreviewedOnly {
+			fmt.Fprintf(os.Stderr, "Error: --approved-only and --unreviewed-only are mutually exclusive\n")
+			os.Exit(1)
+		}
 
 		// Normalize labels: trim, dedupe, remove empty
 		labels = util.NormalizeLabels(labels)
@@ -50,12 +58,14 @@ var readyCmd = &cobra.Command{
 		// If daemon is running, use RPC
 		if daemonClient != nil {
 			readyArgs := &rpc.ReadyArgs{
-				Assignee:   assignee,
-				Unassigned: unassigned,
-				Limit:      limit,
-				SortPolicy: sortPolicy,
-				Labels:     labels,
-				LabelsAny:  labelsAny,
+				Assignee:       assignee,
+				Unassigned:     unassigned,
+				Limit:          limit,
+				SortPolicy:     sortPolicy,
+				Labels:         labels,
+				LabelsAny:      labelsAny,
+				ApprovedOnly:   approvedOnly,
+				UnreviewedOnly: unreviewedOnly,
 			}
 			if cmd.Flags().Changed("priority") {
 				priority, _ := cmd.Flags().GetInt("priority")
@@ -71,6 +81,9 @@ var readyCmd = &cobra.Command{
 				fmt.Fprintf(os.Stderr, "Error parsing response: %v\n", err)
 				os.Exit(1)
 			}
+			// Note: Filtering is now done server-side by daemon, but we keep client-side
+			// filtering as a fallback for older daemon versions that don't support review filters
+			issues = filterByReviewStatus(issues, approvedOnly, unreviewedOnly)
 			if jsonOutput {
 				if issues == nil {
 					issues = []*types.Issue{}
@@ -144,6 +157,8 @@ var readyCmd = &cobra.Command{
 			}
 		}
 	}
+		// Filter by review status if requested
+		issues = filterByReviewStatus(issues, approvedOnly, unreviewedOnly)
 		if jsonOutput {
 			// Always output array, even if empty
 			if issues == nil {
@@ -322,6 +337,26 @@ var statsCmd = &cobra.Command{
 		fmt.Println()
 	},
 }
+// filterByReviewStatus filters issues by review status.
+// If approvedOnly is true, returns only issues with review_status='approved'.
+// If unreviewedOnly is true, returns only issues with review_status='unreviewed' or empty.
+// If neither is true, returns all issues unchanged.
+func filterByReviewStatus(issues []*types.Issue, approvedOnly, unreviewedOnly bool) []*types.Issue {
+	if !approvedOnly && !unreviewedOnly {
+		return issues
+	}
+
+	var filtered []*types.Issue
+	for _, issue := range issues {
+		if approvedOnly && issue.ReviewStatus == types.ReviewStatusApproved {
+			filtered = append(filtered, issue)
+		} else if unreviewedOnly && (issue.ReviewStatus == "" || issue.ReviewStatus == types.ReviewStatusUnreviewed) {
+			filtered = append(filtered, issue)
+		}
+	}
+	return filtered
+}
+
 func init() {
 	readyCmd.Flags().IntP("limit", "n", 10, "Maximum issues to show")
 	readyCmd.Flags().IntP("priority", "p", 0, "Filter by priority")
@@ -330,6 +365,8 @@ func init() {
 	readyCmd.Flags().StringP("sort", "s", "hybrid", "Sort policy: hybrid (default), priority, oldest")
 	readyCmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL). Can combine with --label-any")
 	readyCmd.Flags().StringSlice("label-any", []string{}, "Filter by labels (OR: must have AT LEAST ONE). Can combine with --label")
+	readyCmd.Flags().Bool("approved-only", false, "Show only approved issues (review_status='approved')")
+	readyCmd.Flags().Bool("unreviewed-only", false, "Show only unreviewed issues (review_status='unreviewed' or empty)")
 	rootCmd.AddCommand(readyCmd)
 	rootCmd.AddCommand(blockedCmd)
 	rootCmd.AddCommand(statsCmd)

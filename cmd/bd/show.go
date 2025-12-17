@@ -137,6 +137,9 @@ var showCmd = &cobra.Command{
 					fmt.Printf("Created: %s\n", issue.CreatedAt.Format("2006-01-02 15:04"))
 					fmt.Printf("Updated: %s\n", issue.UpdatedAt.Format("2006-01-02 15:04"))
 
+					// Show review status if reviewed
+					printReviewStatus(issue)
+
 					// Show compaction status
 					if issue.CompactionLevel > 0 {
 						fmt.Println()
@@ -317,6 +320,9 @@ var showCmd = &cobra.Command{
 			}
 			fmt.Printf("Created: %s\n", issue.CreatedAt.Format("2006-01-02 15:04"))
 			fmt.Printf("Updated: %s\n", issue.UpdatedAt.Format("2006-01-02 15:04"))
+
+			// Show review status if reviewed
+			printReviewStatus(issue)
 
 			// Show compaction status footer
 			if issue.CompactionLevel > 0 {
@@ -1010,6 +1016,20 @@ var closeCmd = &cobra.Command{
 			outputJSON(closedIssues)
 		}
 	},
+}
+
+// printReviewStatus prints the review status line for an issue if it has been reviewed.
+// Returns true if a line was printed.
+func printReviewStatus(issue *types.Issue) bool {
+	if issue.ReviewStatus == "" || issue.ReviewStatus == types.ReviewStatusUnreviewed {
+		return false
+	}
+	reviewTime := ""
+	if issue.ReviewedAt != nil {
+		reviewTime = fmt.Sprintf(" on %s", issue.ReviewedAt.Format("2006-01-02 15:04"))
+	}
+	fmt.Printf("Review: %s by %s%s\n", issue.ReviewStatus, issue.ReviewedBy, reviewTime)
+	return true
 }
 
 func init() {
