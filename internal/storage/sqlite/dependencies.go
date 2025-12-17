@@ -695,6 +695,9 @@ func (s *SQLiteStorage) scanIssues(ctx context.Context, rows *sql.Rows) ([]*type
 		var deletedBy sql.NullString
 		var deleteReason sql.NullString
 		var originalType sql.NullString
+		var reviewStatus sql.NullString
+		var reviewedBy sql.NullString
+		var reviewedAt sql.NullTime
 
 		err := rows.Scan(
 			&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Design,
@@ -702,6 +705,7 @@ func (s *SQLiteStorage) scanIssues(ctx context.Context, rows *sql.Rows) ([]*type
 			&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
 			&issue.CreatedAt, &issue.UpdatedAt, &closedAt, &externalRef, &sourceRepo, &closeReason,
 			&deletedAt, &deletedBy, &deleteReason, &originalType,
+			&reviewStatus, &reviewedBy, &reviewedAt,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan issue: %w", err)
@@ -740,6 +744,15 @@ func (s *SQLiteStorage) scanIssues(ctx context.Context, rows *sql.Rows) ([]*type
 		}
 		if originalType.Valid {
 			issue.OriginalType = originalType.String
+		}
+		if reviewStatus.Valid {
+			issue.ReviewStatus = types.ReviewStatus(reviewStatus.String)
+		}
+		if reviewedBy.Valid {
+			issue.ReviewedBy = reviewedBy.String
+		}
+		if reviewedAt.Valid {
+			issue.ReviewedAt = &reviewedAt.Time
 		}
 
 		issues = append(issues, &issue)

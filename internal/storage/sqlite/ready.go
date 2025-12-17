@@ -100,7 +100,8 @@ func (s *SQLiteStorage) GetReadyWork(ctx context.Context, filter types.WorkFilte
 		SELECT i.id, i.content_hash, i.title, i.description, i.design, i.acceptance_criteria, i.notes,
 		i.status, i.priority, i.issue_type, i.assignee, i.estimated_minutes,
 		i.created_at, i.updated_at, i.closed_at, i.external_ref, i.source_repo, i.close_reason,
-		i.deleted_at, i.deleted_by, i.delete_reason, i.original_type
+		i.deleted_at, i.deleted_by, i.delete_reason, i.original_type,
+		i.review_status, i.reviewed_by, i.reviewed_at
 		FROM issues i
 		WHERE %s
 		AND NOT EXISTS (
@@ -128,7 +129,8 @@ func (s *SQLiteStorage) GetStaleIssues(ctx context.Context, filter types.StaleFi
 			status, priority, issue_type, assignee, estimated_minutes,
 			created_at, updated_at, closed_at, external_ref, source_repo,
 			compaction_level, compacted_at, compacted_at_commit, original_size, close_reason,
-			deleted_at, deleted_by, delete_reason, original_type
+			deleted_at, deleted_by, delete_reason, original_type,
+			review_status, reviewed_by, reviewed_at
 		FROM issues
 		WHERE status != 'closed'
 		  AND datetime(updated_at) < datetime('now', '-' || ? || ' days')
@@ -174,6 +176,9 @@ func (s *SQLiteStorage) GetStaleIssues(ctx context.Context, filter types.StaleFi
 		var deletedBy sql.NullString
 		var deleteReason sql.NullString
 		var originalType sql.NullString
+		var reviewStatus sql.NullString
+		var reviewedBy sql.NullString
+		var reviewedAt sql.NullTime
 
 		err := rows.Scan(
 			&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Design,
@@ -182,6 +187,7 @@ func (s *SQLiteStorage) GetStaleIssues(ctx context.Context, filter types.StaleFi
 			&issue.CreatedAt, &issue.UpdatedAt, &closedAt, &externalRef, &sourceRepo,
 			&compactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &closeReason,
 			&deletedAt, &deletedBy, &deleteReason, &originalType,
+			&reviewStatus, &reviewedBy, &reviewedAt,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan stale issue: %w", err)
@@ -232,6 +238,15 @@ func (s *SQLiteStorage) GetStaleIssues(ctx context.Context, filter types.StaleFi
 		}
 		if originalType.Valid {
 			issue.OriginalType = originalType.String
+		}
+		if reviewStatus.Valid {
+			issue.ReviewStatus = types.ReviewStatus(reviewStatus.String)
+		}
+		if reviewedBy.Valid {
+			issue.ReviewedBy = reviewedBy.String
+		}
+		if reviewedAt.Valid {
+			issue.ReviewedAt = &reviewedAt.Time
 		}
 
 		issues = append(issues, &issue)

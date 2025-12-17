@@ -162,6 +162,9 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 	var deletedBy sql.NullString
 	var deleteReason sql.NullString
 	var originalType sql.NullString
+	var reviewStatus sql.NullString
+	var reviewedBy sql.NullString
+	var reviewedAt sql.NullTime
 
 	var contentHash sql.NullString
 	var compactedAtCommit sql.NullString
@@ -170,7 +173,8 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 		       status, priority, issue_type, assignee, estimated_minutes,
 		       created_at, updated_at, closed_at, external_ref,
 		       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason,
-		       deleted_at, deleted_by, delete_reason, original_type
+		       deleted_at, deleted_by, delete_reason, original_type,
+		       review_status, reviewed_by, reviewed_at
 		FROM issues
 		WHERE id = ?
 	`, id).Scan(
@@ -180,6 +184,7 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 		&issue.CreatedAt, &issue.UpdatedAt, &closedAt, &externalRef,
 		&issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo, &closeReason,
 		&deletedAt, &deletedBy, &deleteReason, &originalType,
+		&reviewStatus, &reviewedBy, &reviewedAt,
 	)
 
 	if err == sql.ErrNoRows {
@@ -231,6 +236,15 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 	}
 	if originalType.Valid {
 		issue.OriginalType = originalType.String
+	}
+	if reviewStatus.Valid {
+		issue.ReviewStatus = types.ReviewStatus(reviewStatus.String)
+	}
+	if reviewedBy.Valid {
+		issue.ReviewedBy = reviewedBy.String
+	}
+	if reviewedAt.Valid {
+		issue.ReviewedAt = &reviewedAt.Time
 	}
 
 	// Fetch labels for this issue
@@ -335,13 +349,17 @@ func (s *SQLiteStorage) GetIssueByExternalRef(ctx context.Context, externalRef s
 	var deletedBy sql.NullString
 	var deleteReason sql.NullString
 	var originalType sql.NullString
+	var reviewStatus sql.NullString
+	var reviewedBy sql.NullString
+	var reviewedAt sql.NullTime
 
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, content_hash, title, description, design, acceptance_criteria, notes,
 		       status, priority, issue_type, assignee, estimated_minutes,
 		       created_at, updated_at, closed_at, external_ref,
 		       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason,
-		       deleted_at, deleted_by, delete_reason, original_type
+		       deleted_at, deleted_by, delete_reason, original_type,
+		       review_status, reviewed_by, reviewed_at
 		FROM issues
 		WHERE external_ref = ?
 	`, externalRef).Scan(
@@ -351,6 +369,7 @@ func (s *SQLiteStorage) GetIssueByExternalRef(ctx context.Context, externalRef s
 		&issue.CreatedAt, &issue.UpdatedAt, &closedAt, &externalRefCol,
 		&issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo, &closeReason,
 		&deletedAt, &deletedBy, &deleteReason, &originalType,
+		&reviewStatus, &reviewedBy, &reviewedAt,
 	)
 
 	if err == sql.ErrNoRows {
@@ -403,6 +422,15 @@ func (s *SQLiteStorage) GetIssueByExternalRef(ctx context.Context, externalRef s
 	if originalType.Valid {
 		issue.OriginalType = originalType.String
 	}
+	if reviewStatus.Valid {
+		issue.ReviewStatus = types.ReviewStatus(reviewStatus.String)
+	}
+	if reviewedBy.Valid {
+		issue.ReviewedBy = reviewedBy.String
+	}
+	if reviewedAt.Valid {
+		issue.ReviewedAt = &reviewedAt.Time
+	}
 
 	// Fetch labels for this issue
 	labels, err := s.GetLabels(ctx, issue.ID)
@@ -428,6 +456,9 @@ var allowedUpdateFields = map[string]bool{
 	"estimated_minutes":   true,
 	"external_ref":        true,
 	"closed_at":           true,
+	"review_status":       true,
+	"reviewed_by":         true,
+	"reviewed_at":         true,
 }
 
 // validatePriority validates a priority value
@@ -1423,7 +1454,8 @@ func (s *SQLiteStorage) SearchIssues(ctx context.Context, query string, filter t
 		SELECT id, content_hash, title, description, design, acceptance_criteria, notes,
 		       status, priority, issue_type, assignee, estimated_minutes,
 		       created_at, updated_at, closed_at, external_ref, source_repo, close_reason,
-		       deleted_at, deleted_by, delete_reason, original_type
+		       deleted_at, deleted_by, delete_reason, original_type,
+		       review_status, reviewed_by, reviewed_at
 		FROM issues
 		%s
 		ORDER BY priority ASC, created_at DESC

@@ -254,7 +254,8 @@ func (t *sqliteTxStorage) GetIssue(ctx context.Context, id string) (*types.Issue
 		       status, priority, issue_type, assignee, estimated_minutes,
 		       created_at, updated_at, closed_at, external_ref,
 		       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason,
-		       deleted_at, deleted_by, delete_reason, original_type
+		       deleted_at, deleted_by, delete_reason, original_type,
+		       review_status, reviewed_by, reviewed_at
 		FROM issues
 		WHERE id = ?
 	`, id)
@@ -1032,7 +1033,8 @@ func (t *sqliteTxStorage) SearchIssues(ctx context.Context, query string, filter
 		       status, priority, issue_type, assignee, estimated_minutes,
 		       created_at, updated_at, closed_at, external_ref,
 		       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason,
-		       deleted_at, deleted_by, delete_reason, original_type
+		       deleted_at, deleted_by, delete_reason, original_type,
+		       review_status, reviewed_by, reviewed_at
 		FROM issues
 		%s
 		ORDER BY priority ASC, created_at DESC
@@ -1072,6 +1074,9 @@ func scanIssueRow(row scanner) (*types.Issue, error) {
 	var deletedBy sql.NullString
 	var deleteReason sql.NullString
 	var originalType sql.NullString
+	var reviewStatus sql.NullString
+	var reviewedBy sql.NullString
+	var reviewedAt sql.NullTime
 
 	err := row.Scan(
 		&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Design,
@@ -1080,6 +1085,7 @@ func scanIssueRow(row scanner) (*types.Issue, error) {
 		&issue.CreatedAt, &issue.UpdatedAt, &closedAt, &externalRef,
 		&issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo, &closeReason,
 		&deletedAt, &deletedBy, &deleteReason, &originalType,
+		&reviewStatus, &reviewedBy, &reviewedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to scan issue: %w", err)
@@ -1127,6 +1133,15 @@ func scanIssueRow(row scanner) (*types.Issue, error) {
 	}
 	if originalType.Valid {
 		issue.OriginalType = originalType.String
+	}
+	if reviewStatus.Valid {
+		issue.ReviewStatus = types.ReviewStatus(reviewStatus.String)
+	}
+	if reviewedBy.Valid {
+		issue.ReviewedBy = reviewedBy.String
+	}
+	if reviewedAt.Valid {
+		issue.ReviewedAt = &reviewedAt.Time
 	}
 
 	return &issue, nil

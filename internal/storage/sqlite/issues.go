@@ -20,8 +20,9 @@ func insertIssue(ctx context.Context, conn *sql.Conn, issue *types.Issue) error 
 			id, content_hash, title, description, design, acceptance_criteria, notes,
 			status, priority, issue_type, assignee, estimated_minutes,
 			created_at, updated_at, closed_at, external_ref, source_repo, close_reason,
-			deleted_at, deleted_by, delete_reason, original_type
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			deleted_at, deleted_by, delete_reason, original_type,
+			review_status, reviewed_by, reviewed_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		issue.ID, issue.ContentHash, issue.Title, issue.Description, issue.Design,
 		issue.AcceptanceCriteria, issue.Notes, issue.Status,
@@ -29,6 +30,7 @@ func insertIssue(ctx context.Context, conn *sql.Conn, issue *types.Issue) error 
 		issue.EstimatedMinutes, issue.CreatedAt, issue.UpdatedAt,
 		issue.ClosedAt, issue.ExternalRef, sourceRepo, issue.CloseReason,
 		issue.DeletedAt, issue.DeletedBy, issue.DeleteReason, issue.OriginalType,
+		issue.ReviewStatus, issue.ReviewedBy, issue.ReviewedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to insert issue: %w", err)
@@ -43,8 +45,9 @@ func insertIssues(ctx context.Context, conn *sql.Conn, issues []*types.Issue) er
 			id, content_hash, title, description, design, acceptance_criteria, notes,
 			status, priority, issue_type, assignee, estimated_minutes,
 			created_at, updated_at, closed_at, external_ref, source_repo, close_reason,
-			deleted_at, deleted_by, delete_reason, original_type
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			deleted_at, deleted_by, delete_reason, original_type,
+			review_status, reviewed_by, reviewed_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %w", err)
@@ -64,6 +67,7 @@ func insertIssues(ctx context.Context, conn *sql.Conn, issues []*types.Issue) er
 			issue.EstimatedMinutes, issue.CreatedAt, issue.UpdatedAt,
 			issue.ClosedAt, issue.ExternalRef, sourceRepo, issue.CloseReason,
 			issue.DeletedAt, issue.DeletedBy, issue.DeleteReason, issue.OriginalType,
+			issue.ReviewStatus, issue.ReviewedBy, issue.ReviewedAt,
 		)
 		if err != nil {
 			return fmt.Errorf("failed to insert issue %s: %w", issue.ID, err)
