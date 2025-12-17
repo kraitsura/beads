@@ -491,6 +491,34 @@ func handleRename(ctx context.Context, s *sqlite.SQLiteStorage, existing *types.
 	return oldID, nil
 }
 
+// addReviewFieldUpdates adds review field updates to the updates map if appropriate.
+// Review field conflict resolution: incoming reviewed_at wins if newer than existing.
+// This ensures the most recent review state is preserved across clones.
+func addReviewFieldUpdates(updates map[string]interface{}, existing, incoming *types.Issue) {
+	// If incoming has no review timestamp, don't overwrite existing review state
+	if incoming.ReviewedAt == nil {
+		return
+	}
+
+	// If existing has no review timestamp, always use incoming
+	// Or if incoming is newer, use incoming
+	if existing.ReviewedAt == nil || incoming.ReviewedAt.After(*existing.ReviewedAt) {
+		// Update review fields from incoming
+		if incoming.ReviewStatus != "" {
+			updates["review_status"] = string(incoming.ReviewStatus)
+		} else {
+			updates["review_status"] = nil
+		}
+		if incoming.ReviewedBy != "" {
+			updates["reviewed_by"] = incoming.ReviewedBy
+		} else {
+			updates["reviewed_by"] = nil
+		}
+		updates["reviewed_at"] = incoming.ReviewedAt
+	}
+	// Otherwise, keep existing review fields (don't add to updates map)
+}
+
 // upsertIssues creates new issues or updates existing ones using content-first matching
 func upsertIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues []*types.Issue, opts Options, result *Result) error {
 	// Get all DB issues once
@@ -565,7 +593,10 @@ func upsertIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues
 					} else {
 					 updates["external_ref"] = nil
 				}
-					
+
+					// Add review field updates with conflict resolution (bd-238v)
+					addReviewFieldUpdates(updates, existing, incoming)
+
 					// Only update if data actually changed
 					if IssueDataChanged(existing, updates) {
 						if err := sqliteStore.UpdateIssue(ctx, existing.ID, updates, "import"); err != nil {
@@ -643,6 +674,9 @@ func upsertIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues
 				} else {
 				 updates["external_ref"] = nil
 			}
+
+				// Add review field updates with conflict resolution (bd-238v)
+				addReviewFieldUpdates(updates, existingWithID, incoming)
 
 				// Only update if data actually changed
 				if IssueDataChanged(existingWithID, updates) {
