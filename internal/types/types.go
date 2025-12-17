@@ -39,6 +39,11 @@ type Issue struct {
 	DeletedBy     string     `json:"deleted_by,omitempty"`     // Who deleted the issue
 	DeleteReason  string     `json:"delete_reason,omitempty"`  // Why the issue was deleted
 	OriginalType  string     `json:"original_type,omitempty"`  // Issue type before deletion (for tombstones)
+
+	// Review workflow fields (bd-238v): structured plan approval
+	ReviewStatus ReviewStatus `json:"review_status,omitempty"` // Current review state
+	ReviewedBy   string       `json:"reviewed_by,omitempty"`   // Who performed the last review
+	ReviewedAt   *time.Time   `json:"reviewed_at,omitempty"`   // When the last review occurred
 }
 
 // ComputeContentHash creates a deterministic hash of the issue's content.
@@ -191,6 +196,26 @@ func (s Status) IsValidWithCustom(customStatuses []string) bool {
 		if string(s) == custom {
 			return true
 		}
+	}
+	return false
+}
+
+// ReviewStatus represents the current review state of an issue
+type ReviewStatus string
+
+// Review status constants
+const (
+	ReviewStatusUnreviewed    ReviewStatus = "unreviewed"     // Default: not yet reviewed
+	ReviewStatusApproved      ReviewStatus = "approved"       // Reviewer has approved
+	ReviewStatusNeedsRevision ReviewStatus = "needs_revision" // Reviewer requested changes
+	ReviewStatusDeferred      ReviewStatus = "deferred"       // Needs discussion or more context
+)
+
+// IsValid checks if the review status value is valid
+func (r ReviewStatus) IsValid() bool {
+	switch r {
+	case ReviewStatusUnreviewed, ReviewStatusApproved, ReviewStatusNeedsRevision, ReviewStatusDeferred, "":
+		return true
 	}
 	return false
 }
@@ -429,4 +454,59 @@ type EpicStatus struct {
 	TotalChildren   int    `json:"total_children"`
 	ClosedChildren  int    `json:"closed_children"`
 	EligibleForClose bool  `json:"eligible_for_close"`
+}
+
+// Review represents a local review history entry (NOT exported to JSONL).
+// This stores the full review history in SQLite for audit trail purposes,
+// while only the current review state (on Issue) syncs via JSONL.
+type Review struct {
+	ID         int64      `json:"id"`
+	IssueID    string     `json:"issue_id"`
+	ReviewType ReviewType `json:"review_type"` // plan, implementation, security, etc.
+	Outcome    string     `json:"outcome"`     // approved, needs_revision, deferred
+	Reviewer   string     `json:"reviewer"`
+	Notes      string     `json:"notes,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+}
+
+// ReviewType categorizes the kind of review
+type ReviewType string
+
+// ReviewType constants for categorizing reviews
+const (
+	ReviewTypePlan           ReviewType = "plan"           // Pre-implementation plan review
+	ReviewTypeImplementation ReviewType = "implementation" // Post-implementation review
+	ReviewTypeSecurity       ReviewType = "security"       // Security-focused review
+)
+
+// IsValid checks if the review type value is valid
+func (r ReviewType) IsValid() bool {
+	switch r {
+	case ReviewTypePlan, ReviewTypeImplementation, ReviewTypeSecurity:
+		return true
+	}
+	return false
+}
+
+// ReviewOutcome constants matching ReviewStatus values
+const (
+	ReviewOutcomeApproved      = "approved"
+	ReviewOutcomeNeedsRevision = "needs_revision"
+	ReviewOutcomeDeferred      = "deferred"
+)
+
+// ReviewSession represents a batch review session (NOT exported to JSONL).
+// This groups reviews performed together during a single review session,
+// enabling tracking of review batches and reviewer productivity.
+type ReviewSession struct {
+	ID                 int64      `json:"id"`
+	RootIssueID        string     `json:"root_issue_id"` // Epic or starting point of review
+	Reviewer           string     `json:"reviewer"`
+	StartedAt          time.Time  `json:"started_at"`
+	CompletedAt        *time.Time `json:"completed_at,omitempty"`
+	Summary            string     `json:"summary,omitempty"`
+	ItemsReviewed      int        `json:"items_reviewed"`
+	ItemsApproved      int        `json:"items_approved"`
+	ItemsNeedsRevision int        `json:"items_needs_revision"`
+	ItemsDeferred      int        `json:"items_deferred"`
 }

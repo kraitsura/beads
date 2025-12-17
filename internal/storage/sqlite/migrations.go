@@ -35,6 +35,9 @@ var migrationsList = []Migration{
 	{"orphan_detection", migrations.MigrateOrphanDetection},
 	{"close_reason_column", migrations.MigrateCloseReasonColumn},
 	{"tombstone_columns", migrations.MigrateTombstoneColumns},
+	{"review_columns", migrations.MigrateReviewColumns},
+	{"reviews_table", migrations.MigrateReviewsTable},
+	{"review_sessions_table", migrations.MigrateReviewSessionsTable},
 }
 
 // MigrationInfo contains metadata about a migration for inspection
@@ -77,6 +80,9 @@ func getMigrationDescription(name string) string {
 		"orphan_detection":             "Detects orphaned child issues and logs them for user action (bd-3852)",
 		"close_reason_column":          "Adds close_reason column to issues table for storing closure explanations (bd-uyu)",
 		"tombstone_columns":            "Adds tombstone columns (deleted_at, deleted_by, delete_reason, original_type) for inline soft-delete (bd-vw8)",
+		"review_columns":               "Adds review workflow columns (review_status, reviewed_by, reviewed_at) for plan approval workflow",
+		"reviews_table":                "Adds reviews table for local review history (not exported to JSONL)",
+		"review_sessions_table":        "Adds review_sessions table for grouping batch reviews (not exported to JSONL)",
 	}
 	
 	if desc, ok := descriptions[name]; ok {

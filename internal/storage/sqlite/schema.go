@@ -27,6 +27,9 @@ CREATE TABLE IF NOT EXISTS issues (
     deleted_by TEXT DEFAULT '',
     delete_reason TEXT DEFAULT '',
     original_type TEXT DEFAULT '',
+    review_status TEXT DEFAULT 'unreviewed' CHECK(review_status IN ('', 'unreviewed', 'approved', 'needs_revision', 'deferred')),
+    reviewed_by TEXT,
+    reviewed_at DATETIME,
     CHECK ((status = 'closed') = (closed_at IS NOT NULL))
 );
 
@@ -35,6 +38,7 @@ CREATE INDEX IF NOT EXISTS idx_issues_priority ON issues(priority);
 CREATE INDEX IF NOT EXISTS idx_issues_assignee ON issues(assignee);
 CREATE INDEX IF NOT EXISTS idx_issues_created_at ON issues(created_at);
 -- Note: idx_issues_external_ref is created in migrations/002_external_ref_column.go
+-- Note: idx_issues_review_status and idx_issues_reviewed_at are created in migrations/019_review_columns.go
 
 -- Dependencies table
 CREATE TABLE IF NOT EXISTS dependencies (
@@ -91,6 +95,42 @@ CREATE TABLE IF NOT EXISTS events (
 
 CREATE INDEX IF NOT EXISTS idx_events_issue ON events(issue_id);
 CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at);
+
+-- Reviews table (local review history, NOT exported to JSONL)
+-- Stores full review history for audit trail while keeping portable format lightweight
+CREATE TABLE IF NOT EXISTS reviews (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    issue_id TEXT NOT NULL,
+    review_type TEXT NOT NULL DEFAULT 'plan',
+    outcome TEXT NOT NULL CHECK(outcome IN ('approved', 'needs_revision', 'deferred')),
+    reviewer TEXT NOT NULL,
+    notes TEXT DEFAULT '',
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (issue_id) REFERENCES issues(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_reviews_issue ON reviews(issue_id);
+CREATE INDEX IF NOT EXISTS idx_reviews_reviewer ON reviews(reviewer);
+CREATE INDEX IF NOT EXISTS idx_reviews_created ON reviews(created_at);
+
+-- Review sessions table (local batch review tracking, NOT exported to JSONL)
+-- Groups reviews performed together during a single review session
+CREATE TABLE IF NOT EXISTS review_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    root_issue_id TEXT NOT NULL,
+    reviewer TEXT NOT NULL,
+    started_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at DATETIME,
+    summary TEXT DEFAULT '',
+    items_reviewed INTEGER DEFAULT 0,
+    items_approved INTEGER DEFAULT 0,
+    items_needs_revision INTEGER DEFAULT 0,
+    items_deferred INTEGER DEFAULT 0,
+    FOREIGN KEY (root_issue_id) REFERENCES issues(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_review_sessions_root ON review_sessions(root_issue_id);
+CREATE INDEX IF NOT EXISTS idx_review_sessions_reviewer ON review_sessions(reviewer);
 
 -- Config table (for storing settings like issue prefix)
 CREATE TABLE IF NOT EXISTS config (
