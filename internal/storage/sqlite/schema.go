@@ -27,9 +27,17 @@ CREATE TABLE IF NOT EXISTS issues (
     deleted_by TEXT DEFAULT '',
     delete_reason TEXT DEFAULT '',
     original_type TEXT DEFAULT '',
+    -- Review workflow fields
     review_status TEXT DEFAULT 'unreviewed' CHECK(review_status IN ('', 'unreviewed', 'approved', 'needs_revision', 'deferred')),
     reviewed_by TEXT,
     reviewed_at DATETIME,
+    -- Messaging fields (bd-kwro)
+    sender TEXT DEFAULT '',
+    ephemeral INTEGER DEFAULT 0,
+    replies_to TEXT DEFAULT '',
+    relates_to TEXT DEFAULT '',
+    duplicate_of TEXT DEFAULT '',
+    superseded_by TEXT DEFAULT '',
     CHECK ((status = 'closed') = (closed_at IS NOT NULL))
 );
 

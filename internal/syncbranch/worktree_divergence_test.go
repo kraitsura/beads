@@ -313,96 +313,6 @@ func TestPerformContentMerge(t *testing.T) {
 	})
 }
 
-// TestPerformDeletionsMerge tests the deletions merge function
-func TestPerformDeletionsMerge(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
-
-	ctx := context.Background()
-
-	t.Run("merges deletions from both sides", func(t *testing.T) {
-		repoDir := setupTestRepo(t)
-		defer os.RemoveAll(repoDir)
-
-		runGit(t, repoDir, "checkout", "-b", "test-branch")
-
-		// Base: no deletions
-		writeFile(t, filepath.Join(repoDir, ".beads", "issues.jsonl"), `{"id":"test-1"}`)
-		runGit(t, repoDir, "add", ".")
-		runGit(t, repoDir, "commit", "-m", "base commit")
-		baseCommit := strings.TrimSpace(getGitOutput(t, repoDir, "rev-parse", "HEAD"))
-
-		// Local: delete issue-A
-		writeFile(t, filepath.Join(repoDir, ".beads", "deletions.jsonl"), `{"id":"issue-A","deleted_at":"2024-01-01T00:00:00Z"}`)
-		runGit(t, repoDir, "add", ".")
-		runGit(t, repoDir, "commit", "-m", "local deletion")
-		localHead := strings.TrimSpace(getGitOutput(t, repoDir, "rev-parse", "HEAD"))
-
-		// Remote: delete issue-B
-		runGit(t, repoDir, "checkout", baseCommit)
-		writeFile(t, filepath.Join(repoDir, ".beads", "deletions.jsonl"), `{"id":"issue-B","deleted_at":"2024-01-02T00:00:00Z"}`)
-		runGit(t, repoDir, "add", ".")
-		runGit(t, repoDir, "commit", "-m", "remote deletion")
-		runGit(t, repoDir, "update-ref", "refs/remotes/origin/test-branch", "HEAD")
-
-		// Go back to local
-		runGit(t, repoDir, "checkout", "-B", "test-branch", localHead)
-
-		// Perform merge
-		merged, err := performDeletionsMerge(ctx, repoDir, "test-branch", "origin", ".beads/deletions.jsonl")
-		if err != nil {
-			t.Fatalf("performDeletionsMerge() error = %v", err)
-		}
-
-		// Both deletions should be present
-		mergedStr := string(merged)
-		if !strings.Contains(mergedStr, "issue-A") {
-			t.Error("merged deletions missing issue-A")
-		}
-		if !strings.Contains(mergedStr, "issue-B") {
-			t.Error("merged deletions missing issue-B")
-		}
-	})
-
-	t.Run("handles only local deletions", func(t *testing.T) {
-		repoDir := setupTestRepo(t)
-		defer os.RemoveAll(repoDir)
-
-		runGit(t, repoDir, "checkout", "-b", "test-branch")
-
-		// Base: no deletions
-		writeFile(t, filepath.Join(repoDir, ".beads", "issues.jsonl"), `{"id":"test-1"}`)
-		runGit(t, repoDir, "add", ".")
-		runGit(t, repoDir, "commit", "-m", "base commit")
-		baseCommit := strings.TrimSpace(getGitOutput(t, repoDir, "rev-parse", "HEAD"))
-
-		// Local: has deletions
-		writeFile(t, filepath.Join(repoDir, ".beads", "deletions.jsonl"), `{"id":"issue-A"}`)
-		runGit(t, repoDir, "add", ".")
-		runGit(t, repoDir, "commit", "-m", "local deletion")
-		localHead := strings.TrimSpace(getGitOutput(t, repoDir, "rev-parse", "HEAD"))
-
-		// Remote: no deletions file
-		runGit(t, repoDir, "checkout", baseCommit)
-		runGit(t, repoDir, "update-ref", "refs/remotes/origin/test-branch", "HEAD")
-
-		// Go back to local
-		runGit(t, repoDir, "checkout", "-B", "test-branch", localHead)
-
-		// Perform merge
-		merged, err := performDeletionsMerge(ctx, repoDir, "test-branch", "origin", ".beads/deletions.jsonl")
-		if err != nil {
-			t.Fatalf("performDeletionsMerge() error = %v", err)
-		}
-
-		// Local deletions should be present
-		if !strings.Contains(string(merged), "issue-A") {
-			t.Error("merged deletions missing issue-A")
-		}
-	})
-}
-
 // Helper functions
 
 func setupTestRepo(t *testing.T) string {
@@ -682,4 +592,71 @@ func TestCountIssuesInContent(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestIsSyncBranchSameAsCurrent tests detection of sync.branch == current branch (GH#519)
+func TestIsSyncBranchSameAsCurrent(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	ctx := context.Background()
+
+	t.Run("returns true when sync branch equals current branch", func(t *testing.T) {
+		repoDir := setupTestRepo(t)
+		defer os.RemoveAll(repoDir)
+
+		// Create initial commit so we can get current branch
+		writeFile(t, filepath.Join(repoDir, ".beads", "issues.jsonl"), `{"id":"test-1"}`)
+		runGit(t, repoDir, "add", ".")
+		runGit(t, repoDir, "commit", "-m", "initial commit")
+
+		// Get current branch name
+		currentBranch := strings.TrimSpace(getGitOutput(t, repoDir, "symbolic-ref", "--short", "HEAD"))
+
+		// Save original dir and change to test repo
+		origDir, _ := os.Getwd()
+		os.Chdir(repoDir)
+		defer os.Chdir(origDir)
+
+		// Should return true when sync branch == current branch
+		if !IsSyncBranchSameAsCurrent(ctx, currentBranch) {
+			t.Errorf("IsSyncBranchSameAsCurrent(%q) = false, want true", currentBranch)
+		}
+	})
+
+	t.Run("returns false when sync branch differs from current branch", func(t *testing.T) {
+		repoDir := setupTestRepo(t)
+		defer os.RemoveAll(repoDir)
+
+		// Create initial commit
+		writeFile(t, filepath.Join(repoDir, ".beads", "issues.jsonl"), `{"id":"test-1"}`)
+		runGit(t, repoDir, "add", ".")
+		runGit(t, repoDir, "commit", "-m", "initial commit")
+
+		// Save original dir and change to test repo
+		origDir, _ := os.Getwd()
+		os.Chdir(repoDir)
+		defer os.Chdir(origDir)
+
+		// Should return false when sync branch != current branch
+		if IsSyncBranchSameAsCurrent(ctx, "beads-sync") {
+			t.Error("IsSyncBranchSameAsCurrent(\"beads-sync\") = true, want false")
+		}
+	})
+
+	t.Run("returns false on error getting current branch", func(t *testing.T) {
+		// Test in a non-git directory
+		tmpDir, _ := os.MkdirTemp("", "non-git-*")
+		defer os.RemoveAll(tmpDir)
+
+		origDir, _ := os.Getwd()
+		os.Chdir(tmpDir)
+		defer os.Chdir(origDir)
+
+		// Should return false when not in a git repo
+		if IsSyncBranchSameAsCurrent(ctx, "any-branch") {
+			t.Error("IsSyncBranchSameAsCurrent in non-git dir = true, want false")
+		}
+	})
 }

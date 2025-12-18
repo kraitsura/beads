@@ -1,18 +1,12 @@
 package importer
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
-	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
-	"time"
 
-	"github.com/steveyegge/beads/internal/deletions"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
@@ -41,9 +35,8 @@ type Options struct {
 	RenameOnImport             bool           // Rename imported issues to match database prefix
 	SkipPrefixValidation       bool           // Skip prefix validation (for auto-import)
 	OrphanHandling             OrphanHandling // How to handle missing parent issues (default: allow)
-	ClearDuplicateExternalRefs bool           // Clear duplicate external_ref values instead of erroring
-	NoGitHistory               bool           // Skip git history backfill for deletions (prevents spurious deletion during JSONL migrations)
-	IgnoreDeletions            bool           // Import issues even if they're in the deletions manifest
+	ClearDuplicateExternalRefs bool            // Clear duplicate external_ref values instead of erroring
+	ProtectLocalExportIDs      map[string]bool // IDs from left snapshot to protect from deletion (bd-sync-deletion fix)
 }
 
 // Result contains statistics about the import operation
@@ -59,12 +52,6 @@ type Result struct {
 	ExpectedPrefix      string            // Database configured prefix
 	MismatchPrefixes    map[string]int    // Map of mismatched prefixes to count
 	SkippedDependencies []string          // Dependencies skipped due to FK constraint violations
-	Purged                int               // Issues purged from DB (found in deletions manifest)
-	PurgedIDs             []string          // IDs that were purged
-	SkippedDeleted        int               // Issues skipped because they're in deletions manifest
-	SkippedDeletedIDs     []string          // IDs that were skipped due to deletions manifest
-	ConvertedToTombstone  int               // Legacy deletions.jsonl entries converted to tombstones (bd-wucl)
-	ConvertedTombstoneIDs []string          // IDs that were converted to tombstones
 }
 
 // ImportIssues handles the core import logic used by both manual and auto-import.
@@ -119,66 +106,9 @@ func ImportIssues(ctx context.Context, dbPath string, store storage.Storage, iss
 		opts.OrphanHandling = sqliteStore.GetOrphanHandling(ctx)
 	}
 
-	// Handle deletions manifest and tombstones (bd-dve)
-	//
-	// Phase 1 (Dual-Write):
-	// - Tombstones in JSONL are imported as-is (they're issues with status=tombstone)
-	// - Legacy deletions.jsonl entries are converted to tombstones
-	// - Non-tombstone issues in deletions manifest are skipped (backwards compat)
-	//
-	// Note: Tombstones from JSONL take precedence over legacy deletions.jsonl
-	if !opts.IgnoreDeletions && dbPath != "" {
-		beadsDir := filepath.Dir(dbPath)
-		deletionsPath := deletions.DefaultPath(beadsDir)
-		loadResult, err := deletions.LoadDeletions(deletionsPath)
-		if err == nil && len(loadResult.Records) > 0 {
-			// Build a map of existing tombstones from JSONL for quick lookup
-			tombstoneIDs := make(map[string]bool)
-			for _, issue := range issues {
-				if issue.IsTombstone() {
-					tombstoneIDs[issue.ID] = true
-				}
-			}
-
-			var filteredIssues []*types.Issue
-			for _, issue := range issues {
-				// Tombstones are always imported (they represent deletions in the new format)
-				if issue.IsTombstone() {
-					filteredIssues = append(filteredIssues, issue)
-					continue
-				}
-
-				if del, found := loadResult.Records[issue.ID]; found {
-					// Non-tombstone issue is in deletions manifest - skip it
-					// (this maintains backward compatibility during transition)
-					result.SkippedDeleted++
-					result.SkippedDeletedIDs = append(result.SkippedDeletedIDs, issue.ID)
-					fmt.Fprintf(os.Stderr, "Skipping %s (in deletions manifest: deleted %s by %s)\n",
-						issue.ID, del.Timestamp.Format("2006-01-02"), del.Actor)
-				} else {
-					filteredIssues = append(filteredIssues, issue)
-				}
-			}
-
-			// Convert legacy deletions.jsonl entries to tombstones if not already in JSONL
-			for id, del := range loadResult.Records {
-				if tombstoneIDs[id] {
-					// Already have a tombstone for this ID in JSONL, skip
-					continue
-				}
-				// Convert this deletion record to a tombstone (bd-wucl)
-				tombstone := convertDeletionToTombstone(id, del)
-				filteredIssues = append(filteredIssues, tombstone)
-				result.ConvertedToTombstone++
-				result.ConvertedTombstoneIDs = append(result.ConvertedTombstoneIDs, id)
-			}
-
-			issues = filteredIssues
-		}
-	}
-
 	// Check and handle prefix mismatches
-	if err := handlePrefixMismatch(ctx, sqliteStore, issues, opts, result); err != nil {
+	issues, err = handlePrefixMismatch(ctx, sqliteStore, issues, opts, result)
+	if err != nil {
 		return result, err
 	}
 
@@ -216,15 +146,6 @@ func ImportIssues(ctx context.Context, dbPath string, store storage.Storage, iss
 		return nil, err
 	}
 
-	// Purge deleted issues from DB based on deletions manifest
-	// Issues that are in the manifest but not in JSONL should be deleted from DB
-	if !opts.DryRun {
-		if err := purgeDeletedIssues(ctx, sqliteStore, dbPath, issues, opts, result); err != nil {
-			// Non-fatal - just log warning
-			fmt.Fprintf(os.Stderr, "Warning: failed to purge deleted issues: %v\n", err)
-		}
-	}
-
 	// Checkpoint WAL to ensure data persistence and reduce WAL file size
 	if err := sqliteStore.CheckpointWAL(ctx); err != nil {
 		// Non-fatal - just log warning
@@ -256,48 +177,90 @@ func getOrCreateStore(ctx context.Context, dbPath string, store storage.Storage)
 	return sqliteStore, true, nil
 }
 
-// handlePrefixMismatch checks and handles prefix mismatches
-func handlePrefixMismatch(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues []*types.Issue, opts Options, result *Result) error {
+// handlePrefixMismatch checks and handles prefix mismatches.
+// Returns a filtered issues slice with tombstoned issues having wrong prefixes removed (bd-6pni).
+func handlePrefixMismatch(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues []*types.Issue, opts Options, result *Result) ([]*types.Issue, error) {
 	configuredPrefix, err := sqliteStore.GetConfig(ctx, "issue_prefix")
 	if err != nil {
-		return fmt.Errorf("failed to get configured prefix: %w", err)
+		return nil, fmt.Errorf("failed to get configured prefix: %w", err)
 	}
 
 	// Only validate prefixes if a prefix is configured
 	if strings.TrimSpace(configuredPrefix) == "" {
 		if opts.RenameOnImport {
-			return fmt.Errorf("cannot rename: issue_prefix not configured in database")
+			return nil, fmt.Errorf("cannot rename: issue_prefix not configured in database")
 		}
-		return nil
+		return issues, nil
 	}
 
 	result.ExpectedPrefix = configuredPrefix
 
 	// Analyze prefixes in imported issues
+	// Track tombstones separately - they don't count as "real" mismatches (bd-6pni)
+	tombstoneMismatchPrefixes := make(map[string]int)
+	nonTombstoneMismatchCount := 0
+
+	// Also track which tombstones have wrong prefixes for filtering
+	var filteredIssues []*types.Issue
+	var tombstonesToRemove []string
+
 	for _, issue := range issues {
 		prefix := utils.ExtractIssuePrefix(issue.ID)
 		if prefix != configuredPrefix {
-			result.PrefixMismatch = true
-			result.MismatchPrefixes[prefix]++
+			if issue.IsTombstone() {
+				tombstoneMismatchPrefixes[prefix]++
+				tombstonesToRemove = append(tombstonesToRemove, issue.ID)
+				// Don't add to filtered list - we'll remove these
+			} else {
+				result.PrefixMismatch = true
+				result.MismatchPrefixes[prefix]++
+				nonTombstoneMismatchCount++
+				filteredIssues = append(filteredIssues, issue)
+			}
+		} else {
+			// Correct prefix - keep the issue
+			filteredIssues = append(filteredIssues, issue)
 		}
 	}
 
-	// If prefix mismatch detected and not handling it, return error or warning
-	if result.PrefixMismatch && !opts.RenameOnImport && !opts.DryRun && !opts.SkipPrefixValidation {
-		return fmt.Errorf("prefix mismatch detected: database uses '%s-' but found issues with prefixes: %v (use --rename-on-import to automatically fix)", configuredPrefix, GetPrefixList(result.MismatchPrefixes))
+	// bd-6pni: If ALL mismatched prefix issues are tombstones, they're just pollution
+	// from contributor PRs that used different test prefixes. These are safe to remove.
+	if nonTombstoneMismatchCount == 0 && len(tombstoneMismatchPrefixes) > 0 {
+		// Log that we're ignoring tombstoned mismatches
+		var tombstonePrefixList []string
+		for prefix, count := range tombstoneMismatchPrefixes {
+			tombstonePrefixList = append(tombstonePrefixList, fmt.Sprintf("%s- (%d tombstones)", prefix, count))
+		}
+		fmt.Fprintf(os.Stderr, "Ignoring prefix mismatches (all are tombstones): %v\n", tombstonePrefixList)
+		// Clear mismatch flags - no real issues to worry about
+		result.PrefixMismatch = false
+		result.MismatchPrefixes = make(map[string]int)
+		// Return filtered list without the tombstones
+		return filteredIssues, nil
+	}
+
+	// If there are non-tombstone mismatches, we need to include all issues (tombstones too)
+	// but still report the error for non-tombstones
+	if result.PrefixMismatch {
+		// If not handling the mismatch, return error
+		if !opts.RenameOnImport && !opts.DryRun && !opts.SkipPrefixValidation {
+			return nil, fmt.Errorf("prefix mismatch detected: database uses '%s-' but found issues with prefixes: %v (use --rename-on-import to automatically fix)", configuredPrefix, GetPrefixList(result.MismatchPrefixes))
+		}
 	}
 
 	// Handle rename-on-import if requested
 	if result.PrefixMismatch && opts.RenameOnImport && !opts.DryRun {
 		if err := RenameImportedIssuePrefixes(issues, configuredPrefix); err != nil {
-			return fmt.Errorf("failed to rename prefixes: %w", err)
+			return nil, fmt.Errorf("failed to rename prefixes: %w", err)
 		}
 		// After renaming, clear the mismatch flags since we fixed them
 		result.PrefixMismatch = false
 		result.MismatchPrefixes = make(map[string]int)
+		return issues, nil
 	}
 
-	return nil
+	// Return original issues if no filtering needed
+	return issues, nil
 }
 
 // detectUpdates detects same-ID scenarios (which are updates with hash IDs, not collisions)
@@ -521,8 +484,9 @@ func addReviewFieldUpdates(updates map[string]interface{}, existing, incoming *t
 
 // upsertIssues creates new issues or updates existing ones using content-first matching
 func upsertIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues []*types.Issue, opts Options, result *Result) error {
-	// Get all DB issues once
-	dbIssues, err := sqliteStore.SearchIssues(ctx, "", types.IssueFilter{})
+	// Get all DB issues once - include tombstones to prevent UNIQUE constraint violations
+	// when trying to create issues that were previously deleted (bd-sync-tombstone-fix)
+	dbIssues, err := sqliteStore.SearchIssues(ctx, "", types.IssueFilter{IncludeTombstones: true})
 	if err != nil {
 		return fmt.Errorf("failed to get DB issues: %w", err)
 	}
@@ -556,7 +520,17 @@ func upsertIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues
 			continue
 		}
 		seenHashes[hash] = true
-		
+
+		// CRITICAL: Check for tombstone FIRST, before any other matching (bd-4q8 fix)
+		// This prevents ghost resurrection regardless of which phase would normally match.
+		// If this ID has a tombstone in the DB, skip importing it entirely.
+		if existingByID, found := dbByID[incoming.ID]; found {
+			if existingByID.Status == types.StatusTombstone {
+				result.Skipped++
+				continue
+			}
+		}
+
 		// Phase 0: Match by external_ref first (if present)
 		// This enables re-syncing from external systems (Jira, GitHub, Linear)
 		if incoming.ExternalRef != nil && *incoming.ExternalRef != "" {
@@ -620,8 +594,18 @@ func upsertIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues
 				// Exact match (same content, same ID) - idempotent case
 				result.Unchanged++
 			} else {
-				// Same content, different ID - rename detected
-				if !opts.SkipUpdate {
+				// Same content, different ID - check if this is a rename or cross-prefix duplicate
+				existingPrefix := utils.ExtractIssuePrefix(existing.ID)
+				incomingPrefix := utils.ExtractIssuePrefix(incoming.ID)
+
+				if existingPrefix != incomingPrefix {
+					// Cross-prefix content match: same content but different projects/prefixes.
+					// This is NOT a rename - it's a duplicate from another project.
+					// Skip the incoming issue and keep the existing one unchanged.
+					// Calling handleRename would fail because CreateIssue validates prefix.
+					result.Skipped++
+				} else if !opts.SkipUpdate {
+					// Same prefix, different ID suffix - this is a true rename
 					deletedID, err := handleRename(ctx, sqliteStore, existing, incoming)
 					if err != nil {
 						return fmt.Errorf("failed to handle rename %s -> %s: %w", existing.ID, incoming.ID, err)
@@ -640,6 +624,11 @@ func upsertIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues
 
 		// Phase 2: New content - check for ID collision
 		if existingWithID, found := dbByID[incoming.ID]; found {
+			// Skip tombstones - don't try to update or resurrect deleted issues (bd-sync-tombstone-fix)
+			if existingWithID.Status == types.StatusTombstone {
+				result.Skipped++
+				continue
+			}
 			// ID exists but different content - this is a collision
 			// The update should have been detected earlier by detectUpdates
 			// If we reach here, it means collision wasn't resolved - treat as update
@@ -696,24 +685,62 @@ func upsertIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues
 		}
 	}
 
+// Filter out orphaned issues if orphan_handling is set to skip (bd-ckej)
+// Pre-filter before batch creation to prevent orphans from being created then ID-cleared
+if opts.OrphanHandling == sqlite.OrphanSkip {
+	var filteredNewIssues []*types.Issue
+	for _, issue := range newIssues {
+		// Check if this is a hierarchical child whose parent doesn't exist
+		if strings.Contains(issue.ID, ".") {
+			lastDot := strings.LastIndex(issue.ID, ".")
+			parentID := issue.ID[:lastDot]
+			
+			// Check if parent exists in either existing DB issues or in newIssues batch
+			var parentExists bool
+			for _, dbIssue := range dbIssues {
+				if dbIssue.ID == parentID {
+					parentExists = true
+					break
+				}
+			}
+			if !parentExists {
+				for _, newIssue := range newIssues {
+					if newIssue.ID == parentID {
+						parentExists = true
+						break
+					}
+				}
+			}
+			
+			if !parentExists {
+				// Skip this orphaned issue
+				result.Skipped++
+				continue
+			}
+		}
+		filteredNewIssues = append(filteredNewIssues, issue)
+	}
+	newIssues = filteredNewIssues
+}
+
 // Batch create all new issues
 // Sort by hierarchy depth to ensure parents are created before children
 if len(newIssues) > 0 {
  sort.Slice(newIssues, func(i, j int) bool {
-  depthI := strings.Count(newIssues[i].ID, ".")
- depthJ := strings.Count(newIssues[j].ID, ".")
+   depthI := strings.Count(newIssues[i].ID, ".")
+  depthJ := strings.Count(newIssues[j].ID, ".")
 			if depthI != depthJ {
-  return depthI < depthJ // Shallower first
- }
- return newIssues[i].ID < newIssues[j].ID // Stable sort
+   return depthI < depthJ // Shallower first
+  }
+  return newIssues[i].ID < newIssues[j].ID // Stable sort
 })
 
 // Create in batches by depth level (max depth 3)
 		for depth := 0; depth <= 3; depth++ {
-   var batchForDepth []*types.Issue
-   for _, issue := range newIssues {
-    if strings.Count(issue.ID, ".") == depth {
-    batchForDepth = append(batchForDepth, issue)
+    var batchForDepth []*types.Issue
+    for _, issue := range newIssues {
+     if strings.Count(issue.ID, ".") == depth {
+     batchForDepth = append(batchForDepth, issue)
 				}
 			}
 			if len(batchForDepth) > 0 {
@@ -855,317 +882,6 @@ func importComments(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issu
 	}
 
 	return nil
-}
-
-// purgeDeletedIssues converts DB issues to tombstones if they are in the deletions
-// manifest but not in the incoming JSONL. This enables deletion propagation across clones.
-// Also uses git history fallback for deletions that were pruned from the manifest,
-// unless opts.NoGitHistory is set (useful during JSONL filename migrations).
-//
-// Note (bd-dve): With inline tombstones, most deletions are now handled during import
-// via convertDeletionToTombstone. This function primarily handles:
-// 1. DB-only issues that need to be tombstoned (not in JSONL at all)
-// 2. Git history fallback for pruned deletions
-func purgeDeletedIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, dbPath string, jsonlIssues []*types.Issue, opts Options, result *Result) error {
-	// Get deletions manifest path (same directory as database)
-	beadsDir := filepath.Dir(dbPath)
-	deletionsPath := deletions.DefaultPath(beadsDir)
-
-	// Load deletions manifest (gracefully handles missing/empty file)
-	loadResult, err := deletions.LoadDeletions(deletionsPath)
-	if err != nil {
-		return fmt.Errorf("failed to load deletions manifest: %w", err)
-	}
-
-	// Log any warnings from loading
-	for _, warning := range loadResult.Warnings {
-		fmt.Fprintf(os.Stderr, "Warning: %s\n", warning)
-	}
-
-	// Build set of IDs in the incoming JSONL for O(1) lookup
-	jsonlIDs := make(map[string]bool, len(jsonlIssues))
-	for _, issue := range jsonlIssues {
-		jsonlIDs[issue.ID] = true
-	}
-
-	// Get all DB issues (exclude existing tombstones - they're already deleted)
-	dbIssues, err := sqliteStore.SearchIssues(ctx, "", types.IssueFilter{})
-	if err != nil {
-		return fmt.Errorf("failed to get DB issues: %w", err)
-	}
-
-	// Collect IDs that need git history check (not in JSONL, not in manifest)
-	var needGitCheck []string
-
-	// Find DB issues that:
-	// 1. Are NOT in the JSONL (not synced from remote)
-	// 2. ARE in the deletions manifest (were deleted elsewhere)
-	// 3. Are NOT already tombstones
-	for _, dbIssue := range dbIssues {
-		if jsonlIDs[dbIssue.ID] {
-			// Issue is in JSONL, keep it (tombstone or not)
-			continue
-		}
-
-		if del, found := loadResult.Records[dbIssue.ID]; found {
-			// Issue is in deletions manifest - convert to tombstone (bd-dve)
-			if err := sqliteStore.CreateTombstone(ctx, dbIssue.ID, del.Actor, del.Reason); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to create tombstone for %s: %v\n", dbIssue.ID, err)
-				continue
-			}
-
-			// Log the tombstone creation with metadata
-			fmt.Fprintf(os.Stderr, "Tombstoned %s (deleted %s by %s", dbIssue.ID, del.Timestamp.Format("2006-01-02 15:04:05"), del.Actor)
-			if del.Reason != "" {
-				fmt.Fprintf(os.Stderr, ", reason: %s", del.Reason)
-			}
-			fmt.Fprintf(os.Stderr, ")\n")
-
-			result.Purged++
-			result.PurgedIDs = append(result.PurgedIDs, dbIssue.ID)
-		} else {
-			// Not in JSONL and not in deletions manifest
-			// This could be:
-			// 1. Local work (new issue not yet exported)
-			// 2. Deletion was pruned from manifest (check git history)
-			needGitCheck = append(needGitCheck, dbIssue.ID)
-		}
-	}
-
-	// Git history fallback for potential pruned deletions
-	// Skip if --no-git-history flag is set (prevents spurious deletions during JSONL migrations)
-	if len(needGitCheck) > 0 && !opts.NoGitHistory {
-		deletedViaGit := checkGitHistoryForDeletions(beadsDir, needGitCheck)
-
-		// Safety guard (bd-21a): Prevent mass deletion when JSONL appears reset
-		// If git-history-backfill would delete a large percentage of issues,
-		// this likely indicates the JSONL was reset (git reset, branch switch, etc.)
-		// rather than intentional deletions
-		totalDBIssues := len(dbIssues)
-		deleteCount := len(deletedViaGit)
-
-		if deleteCount > 0 && totalDBIssues > 0 {
-			deletePercent := float64(deleteCount) / float64(totalDBIssues) * 100
-
-			// Abort if would delete >50% of issues - this is almost certainly a reset
-			if deletePercent > 50 {
-				fmt.Fprintf(os.Stderr, "Warning: git-history-backfill would tombstone %d of %d issues (%.1f%%) - aborting\n",
-					deleteCount, totalDBIssues, deletePercent)
-				fmt.Fprintf(os.Stderr, "This usually means the JSONL was reset (git reset, branch switch, etc.)\n")
-				fmt.Fprintf(os.Stderr, "If these are legitimate deletions, add them to deletions.jsonl manually\n")
-				// Don't delete anything - abort the backfill
-				deleteCount = 0
-				deletedViaGit = nil
-			} else if deleteCount > 10 {
-				// Warn (but proceed) if deleting >10 issues
-				fmt.Fprintf(os.Stderr, "Warning: git-history-backfill will tombstone %d issues (%.1f%% of %d total)\n",
-					deleteCount, deletePercent, totalDBIssues)
-			}
-		}
-
-		for _, id := range deletedViaGit {
-			// Backfill the deletions manifest (self-healing)
-			backfillRecord := deletions.DeletionRecord{
-				ID:        id,
-				Timestamp: time.Now().UTC(),
-				Actor:     "git-history-backfill",
-				Reason:    "recovered from git history (pruned from manifest)",
-			}
-			if err := deletions.AppendDeletion(deletionsPath, backfillRecord); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to backfill deletion record for %s: %v\n", id, err)
-			}
-
-			// Convert to tombstone (bd-dve)
-			if err := sqliteStore.CreateTombstone(ctx, id, "git-history-backfill", "recovered from git history (pruned from manifest)"); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to create tombstone for %s (git-recovered): %v\n", id, err)
-				continue
-			}
-
-			fmt.Fprintf(os.Stderr, "Tombstoned %s (recovered from git history, pruned from manifest)\n", id)
-			result.Purged++
-			result.PurgedIDs = append(result.PurgedIDs, id)
-		}
-	} else if len(needGitCheck) > 0 && opts.NoGitHistory {
-		// Log that we skipped git history check due to flag
-		fmt.Fprintf(os.Stderr, "Skipped git history check for %d issue(s) (--no-git-history flag set)\n", len(needGitCheck))
-	}
-
-	return nil
-}
-
-// checkGitHistoryForDeletions checks if IDs were ever in the JSONL history.
-// Returns the IDs that were found in git history (meaning they were deleted,
-// and the deletion record was pruned from the manifest).
-//
-// Uses batched git log search for efficiency when checking multiple IDs.
-func checkGitHistoryForDeletions(beadsDir string, ids []string) []string {
-	if len(ids) == 0 {
-		return nil
-	}
-
-	// Find the actual git repo root using git rev-parse (bd-bhd)
-	// This handles monorepos and nested projects where .beads isn't at repo root
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--show-toplevel")
-	cmd.Dir = beadsDir
-	output, err := cmd.Output()
-	if err != nil {
-		// Not in a git repo or git not available - can't do history check
-		return nil
-	}
-	repoRoot := strings.TrimSpace(string(output))
-
-	// Compute relative path from repo root to issues.jsonl
-	// beadsDir is absolute, compute its path relative to repoRoot
-	absBeadsDir, err := filepath.Abs(beadsDir)
-	if err != nil {
-		return nil
-	}
-
-	relBeadsDir, err := filepath.Rel(repoRoot, absBeadsDir)
-	if err != nil {
-		return nil
-	}
-
-	// Build JSONL path relative to repo root (bd-6xd: issues.jsonl is canonical)
-	jsonlPath := filepath.Join(relBeadsDir, "issues.jsonl")
-
-	var deleted []string
-
-	// For efficiency, batch IDs into a single git command when possible
-	// We use git log with -S to search for string additions/removals
-	if len(ids) <= 10 {
-		// Small batch: check each ID individually for accuracy
-		for _, id := range ids {
-			if wasEverInJSONL(repoRoot, jsonlPath, id) {
-				deleted = append(deleted, id)
-			}
-		}
-	} else {
-		// Large batch: use grep pattern for efficiency
-		// This may have some false positives, but is much faster
-		deleted = batchCheckGitHistory(repoRoot, jsonlPath, ids)
-	}
-
-	return deleted
-}
-
-// gitHistoryTimeout is the maximum time to wait for git history searches.
-// Prevents hangs on large repositories (bd-f0n).
-const gitHistoryTimeout = 30 * time.Second
-
-// wasEverInJSONL checks if a single ID was ever present in the JSONL via git history.
-// Returns true if the ID was found in any commit (added or removed).
-// The caller is responsible for confirming the ID is NOT currently in JSONL
-// to determine that it was deleted (vs still present).
-func wasEverInJSONL(repoRoot, jsonlPath, id string) bool {
-	// git log --all -S "\"id\":\"bd-xxx\"" --oneline -- .beads/issues.jsonl
-	// This searches for commits that added or removed the ID string
-	// Note: -S uses literal string matching, not regex, so no escaping needed
-	searchPattern := fmt.Sprintf(`"id":"%s"`, id)
-
-	// Use context with timeout to prevent hangs on large repos (bd-f0n)
-	ctx, cancel := context.WithTimeout(context.Background(), gitHistoryTimeout)
-	defer cancel()
-
-	// #nosec G204 - searchPattern is constructed from validated issue IDs
-	cmd := exec.CommandContext(ctx, "git", "log", "--all", "-S", searchPattern, "--oneline", "--", jsonlPath)
-	cmd.Dir = repoRoot
-
-	var stdout bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = nil // Ignore stderr
-
-	if err := cmd.Run(); err != nil {
-		// Git command failed - could be shallow clone, not a git repo, timeout, etc.
-		// Conservative: assume issue is local work, don't delete
-		return false
-	}
-
-	// If output is non-empty, the ID was found in git history (was once in JSONL).
-	// Since caller already verified ID is NOT currently in JSONL, this means deleted.
-	return len(bytes.TrimSpace(stdout.Bytes())) > 0
-}
-
-// batchCheckGitHistory checks multiple IDs at once using git log with pattern matching.
-// Returns the IDs that were found in git history.
-func batchCheckGitHistory(repoRoot, jsonlPath string, ids []string) []string {
-	// Build a regex pattern to match any of the IDs
-	// Pattern: "id":"bd-xxx"|"id":"bd-yyy"|...
-	// Escape regex special characters in IDs to avoid malformed patterns (bd-bgs)
-	patterns := make([]string, 0, len(ids))
-	for _, id := range ids {
-		escapedID := regexp.QuoteMeta(id)
-		patterns = append(patterns, fmt.Sprintf(`"id":"%s"`, escapedID))
-	}
-	searchPattern := strings.Join(patterns, "|")
-
-	// Use context with timeout to prevent hangs on large repos (bd-f0n)
-	ctx, cancel := context.WithTimeout(context.Background(), gitHistoryTimeout)
-	defer cancel()
-
-	// Use git log -G (regex) for batch search
-	// #nosec G204 - searchPattern is constructed from validated issue IDs
-	cmd := exec.CommandContext(ctx, "git", "log", "--all", "-G", searchPattern, "-p", "--", jsonlPath)
-	cmd.Dir = repoRoot
-
-	var stdout bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = nil // Ignore stderr
-
-	if err := cmd.Run(); err != nil {
-		// Git command failed (timeout, shallow clone, etc.) - fall back to individual checks
-		// Individual checks also have timeout protection
-		var deleted []string
-		for _, id := range ids {
-			if wasEverInJSONL(repoRoot, jsonlPath, id) {
-				deleted = append(deleted, id)
-			}
-		}
-		return deleted
-	}
-
-	output := stdout.String()
-	if output == "" {
-		return nil
-	}
-
-	// Parse output to find which IDs were actually in history
-	var deleted []string
-	for _, id := range ids {
-		searchStr := fmt.Sprintf(`"id":"%s"`, id)
-		if strings.Contains(output, searchStr) {
-			deleted = append(deleted, id)
-		}
-	}
-
-	return deleted
-}
-
-// Helper functions
-
-// convertDeletionToTombstone converts a legacy DeletionRecord to a tombstone Issue.
-// This is used during import to migrate from deletions.jsonl to inline tombstones (bd-dve).
-// Note: We use zero for priority to indicate unknown (bd-9auw).
-// IssueType must be a valid type for validation, so we use TypeTask as default.
-func convertDeletionToTombstone(id string, del deletions.DeletionRecord) *types.Issue {
-	deletedAt := del.Timestamp
-	return &types.Issue{
-		ID:           id,
-		Title:        "(deleted)",
-		Description:  "",
-		Status:       types.StatusTombstone,
-		Priority:     0,              // Unknown priority (0 = unset, distinguishes from user-set values)
-		IssueType:    types.TypeTask, // Default type (must be valid for validation)
-		CreatedAt:    del.Timestamp,
-		UpdatedAt:    del.Timestamp,
-		DeletedAt:    &deletedAt,
-		DeletedBy:    del.Actor,
-		DeleteReason: del.Reason,
-		OriginalType: "", // Not available in legacy deletions.jsonl
-	}
 }
 
 func GetPrefixList(prefixes map[string]int) []string {

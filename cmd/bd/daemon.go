@@ -36,6 +36,7 @@ Common operations:
   bd daemon --start              Start the daemon (background)
   bd daemon --start --foreground Start in foreground (for systemd/supervisord)
   bd daemon --stop               Stop a running daemon
+  bd daemon --stop-all           Stop ALL running bd daemons
   bd daemon --status             Check if daemon is running
   bd daemon --health             Check daemon health and metrics
 
@@ -43,6 +44,7 @@ Run 'bd daemon' with no flags to see available options.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		start, _ := cmd.Flags().GetBool("start")
 		stop, _ := cmd.Flags().GetBool("stop")
+		stopAll, _ := cmd.Flags().GetBool("stop-all")
 		status, _ := cmd.Flags().GetBool("status")
 		health, _ := cmd.Flags().GetBool("health")
 		metrics, _ := cmd.Flags().GetBool("metrics")
@@ -54,7 +56,7 @@ Run 'bd daemon' with no flags to see available options.`,
 		foreground, _ := cmd.Flags().GetBool("foreground")
 
 		// If no operation flags provided, show help
-		if !start && !stop && !status && !health && !metrics {
+		if !start && !stop && !stopAll && !status && !health && !metrics {
 			_ = cmd.Help()
 			return
 		}
@@ -116,6 +118,11 @@ Run 'bd daemon' with no flags to see available options.`,
 
 		if stop {
 			stopDaemon(pidFile)
+			return
+		}
+
+		if stopAll {
+			stopAllDaemons()
 			return
 		}
 
@@ -222,6 +229,7 @@ func init() {
 	daemonCmd.Flags().Bool("auto-push", false, "Automatically push commits")
 	daemonCmd.Flags().Bool("local", false, "Run in local-only mode (no git required, no sync)")
 	daemonCmd.Flags().Bool("stop", false, "Stop running daemon")
+	daemonCmd.Flags().Bool("stop-all", false, "Stop all running bd daemons")
 	daemonCmd.Flags().Bool("status", false, "Show daemon status")
 	daemonCmd.Flags().Bool("health", false, "Check daemon health and metrics")
 	daemonCmd.Flags().Bool("metrics", false, "Show detailed daemon metrics")
@@ -371,7 +379,11 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush, localMode bool,
 		return // Use return instead of os.Exit to allow defers to run
 	}
 	defer func() { _ = store.Close() }()
-	log.log("Database opened: %s", daemonDBPath)
+
+	// Enable freshness checking to detect external database file modifications
+	// (e.g., when git merge replaces the database file)
+	store.EnableFreshnessChecking()
+	log.log("Database opened: %s (freshness checking enabled)", daemonDBPath)
 
 	// Auto-upgrade .beads/.gitignore if outdated
 	gitignoreCheck := doctor.CheckGitignore()
@@ -454,6 +466,15 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush, localMode bool,
 		return
 	}
 
+	// Choose event loop based on BEADS_DAEMON_MODE (need to determine early for SetConfig)
+	daemonMode := os.Getenv("BEADS_DAEMON_MODE")
+	if daemonMode == "" {
+		daemonMode = "events" // Default to event-driven mode (production-ready as of v0.21.0)
+	}
+
+	// Set daemon configuration for status reporting
+	server.SetConfig(autoCommit, autoPush, localMode, interval.String(), daemonMode)
+
 	// Register daemon in global registry
 	registry, err := daemon.NewRegistry()
 	if err != nil {
@@ -496,12 +517,7 @@ func runDaemonLoop(interval time.Duration, autoCommit, autoPush, localMode bool,
 	parentPID := computeDaemonParentPID()
 	log.log("Monitoring parent process (PID %d)", parentPID)
 
-	// Choose event loop based on BEADS_DAEMON_MODE
-	daemonMode := os.Getenv("BEADS_DAEMON_MODE")
-	if daemonMode == "" {
-		daemonMode = "events" // Default to event-driven mode (production-ready as of v0.21.0)
-	}
-
+	// daemonMode already determined above for SetConfig
 	switch daemonMode {
 	case "events":
 		log.log("Using event-driven mode")

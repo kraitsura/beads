@@ -11,6 +11,49 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
+// parseNullableTimeString parses a nullable time string from database TEXT columns.
+// The ncruces/go-sqlite3 driver only auto-converts TEXT→time.Time for columns declared
+// as DATETIME/DATE/TIME/TIMESTAMP. For TEXT columns (like deleted_at), we must parse manually.
+// Supports RFC3339, RFC3339Nano, and SQLite's native format.
+func parseNullableTimeString(ns sql.NullString) *time.Time {
+	if !ns.Valid || ns.String == "" {
+		return nil
+	}
+	// Try RFC3339Nano first (more precise), then RFC3339, then SQLite format
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05"} {
+		if t, err := time.Parse(layout, ns.String); err == nil {
+			return &t
+		}
+	}
+	return nil // Unparseable - shouldn't happen with valid data
+}
+
+// parseJSONStringArray parses a JSON string array from database TEXT column.
+// Returns empty slice if the string is empty or invalid JSON.
+func parseJSONStringArray(s string) []string {
+	if s == "" {
+		return nil
+	}
+	var result []string
+	if err := json.Unmarshal([]byte(s), &result); err != nil {
+		return nil // Invalid JSON - shouldn't happen with valid data
+	}
+	return result
+}
+
+// formatJSONStringArray formats a string slice as JSON for database storage.
+// Returns empty string if the slice is nil or empty.
+func formatJSONStringArray(arr []string) string {
+	if len(arr) == 0 {
+		return ""
+	}
+	data, err := json.Marshal(arr)
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
 // REMOVED (bd-8e05): getNextIDForPrefix and AllocateNextID - sequential ID generation
 // no longer needed with hash-based IDs
 // Migration functions moved to migrations.go (bd-fc2d, bd-b245)
@@ -33,15 +76,40 @@ func (s *SQLiteStorage) CreateIssue(ctx context.Context, issue *types.Issue, act
 		return fmt.Errorf("failed to get custom statuses: %w", err)
 	}
 
+	// Set timestamps first so defensive fixes can use them
+	now := time.Now()
+	if issue.CreatedAt.IsZero() {
+		issue.CreatedAt = now
+	}
+	if issue.UpdatedAt.IsZero() {
+		issue.UpdatedAt = now
+	}
+
+	// Defensive fix for closed_at invariant (GH#523): older versions of bd could
+	// close issues without setting closed_at. Fix by using max(created_at, updated_at) + 1s.
+	if issue.Status == types.StatusClosed && issue.ClosedAt == nil {
+		maxTime := issue.CreatedAt
+		if issue.UpdatedAt.After(maxTime) {
+			maxTime = issue.UpdatedAt
+		}
+		closedAt := maxTime.Add(time.Second)
+		issue.ClosedAt = &closedAt
+	}
+
+	// Defensive fix for deleted_at invariant: tombstones must have deleted_at
+	if issue.Status == types.StatusTombstone && issue.DeletedAt == nil {
+		maxTime := issue.CreatedAt
+		if issue.UpdatedAt.After(maxTime) {
+			maxTime = issue.UpdatedAt
+		}
+		deletedAt := maxTime.Add(time.Second)
+		issue.DeletedAt = &deletedAt
+	}
+
 	// Validate issue before creating (with custom status support)
 	if err := issue.ValidateWithCustomStatuses(customStatuses); err != nil {
 		return fmt.Errorf("validation failed: %w", err)
 	}
-
-	// Set timestamps
-	now := time.Now()
-	issue.CreatedAt = now
-	issue.UpdatedAt = now
 
 	// Compute content hash (bd-95)
 	if issue.ContentHash == "" {
@@ -105,7 +173,8 @@ func (s *SQLiteStorage) CreateIssue(ctx context.Context, issue *types.Issue, act
 		}
 
 		// For hierarchical IDs (bd-a3f8e9.1), ensure parent exists
-		if strings.Contains(issue.ID, ".") {
+		// Use IsHierarchicalID to correctly handle prefixes with dots (GH#508)
+		if isHierarchical, parentID := IsHierarchicalID(issue.ID); isHierarchical {
 			// Try to resurrect entire parent chain if any parents are missing
 			// Use the conn-based version to participate in the same transaction
 			resurrected, err := s.tryResurrectParentChainWithConn(ctx, conn, issue.ID)
@@ -114,8 +183,6 @@ func (s *SQLiteStorage) CreateIssue(ctx context.Context, issue *types.Issue, act
 			}
 			if !resurrected {
 				// Parent(s) not found in JSONL history - cannot proceed
-				lastDot := strings.LastIndex(issue.ID, ".")
-				parentID := issue.ID[:lastDot]
 				return fmt.Errorf("parent issue %s does not exist and could not be resurrected from JSONL history", parentID)
 			}
 		}
@@ -149,6 +216,9 @@ func (s *SQLiteStorage) CreateIssue(ctx context.Context, issue *types.Issue, act
 
 // GetIssue retrieves an issue by ID
 func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, error) {
+	// Check for external database file modifications (daemon mode)
+	s.checkFreshness()
+
 	var issue types.Issue
 	var closedAt sql.NullTime
 	var estimatedMinutes sql.NullInt64
@@ -158,13 +228,21 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 	var originalSize sql.NullInt64
 	var sourceRepo sql.NullString
 	var closeReason sql.NullString
-	var deletedAt sql.NullTime
+	var deletedAt sql.NullString // TEXT column, not DATETIME - must parse manually
 	var deletedBy sql.NullString
 	var deleteReason sql.NullString
 	var originalType sql.NullString
+	// Review fields
 	var reviewStatus sql.NullString
 	var reviewedBy sql.NullString
 	var reviewedAt sql.NullTime
+	// Messaging fields (bd-kwro)
+	var sender sql.NullString
+	var ephemeral sql.NullInt64
+	var repliesTo sql.NullString
+	var relatesTo sql.NullString
+	var duplicateOf sql.NullString
+	var supersededBy sql.NullString
 
 	var contentHash sql.NullString
 	var compactedAtCommit sql.NullString
@@ -174,7 +252,8 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 		       created_at, updated_at, closed_at, external_ref,
 		       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason,
 		       deleted_at, deleted_by, delete_reason, original_type,
-		       review_status, reviewed_by, reviewed_at
+		       review_status, reviewed_by, reviewed_at,
+		       sender, ephemeral, replies_to, relates_to, duplicate_of, superseded_by
 		FROM issues
 		WHERE id = ?
 	`, id).Scan(
@@ -185,6 +264,7 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 		&issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo, &closeReason,
 		&deletedAt, &deletedBy, &deleteReason, &originalType,
 		&reviewStatus, &reviewedBy, &reviewedAt,
+		&sender, &ephemeral, &repliesTo, &relatesTo, &duplicateOf, &supersededBy,
 	)
 
 	if err == sql.ErrNoRows {
@@ -225,9 +305,7 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 	if closeReason.Valid {
 		issue.CloseReason = closeReason.String
 	}
-	if deletedAt.Valid {
-		issue.DeletedAt = &deletedAt.Time
-	}
+	issue.DeletedAt = parseNullableTimeString(deletedAt)
 	if deletedBy.Valid {
 		issue.DeletedBy = deletedBy.String
 	}
@@ -237,6 +315,7 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 	if originalType.Valid {
 		issue.OriginalType = originalType.String
 	}
+	// Review fields
 	if reviewStatus.Valid {
 		issue.ReviewStatus = types.ReviewStatus(reviewStatus.String)
 	}
@@ -245,6 +324,25 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 	}
 	if reviewedAt.Valid {
 		issue.ReviewedAt = &reviewedAt.Time
+	}
+	// Messaging fields (bd-kwro)
+	if sender.Valid {
+		issue.Sender = sender.String
+	}
+	if ephemeral.Valid && ephemeral.Int64 != 0 {
+		issue.Ephemeral = true
+	}
+	if repliesTo.Valid {
+		issue.RepliesTo = repliesTo.String
+	}
+	if relatesTo.Valid && relatesTo.String != "" {
+		issue.RelatesTo = parseJSONStringArray(relatesTo.String)
+	}
+	if duplicateOf.Valid {
+		issue.DuplicateOf = duplicateOf.String
+	}
+	if supersededBy.Valid {
+		issue.SupersededBy = supersededBy.String
 	}
 
 	// Fetch labels for this issue
@@ -345,13 +443,21 @@ func (s *SQLiteStorage) GetIssueByExternalRef(ctx context.Context, externalRef s
 	var compactedAtCommit sql.NullString
 	var sourceRepo sql.NullString
 	var closeReason sql.NullString
-	var deletedAt sql.NullTime
+	var deletedAt sql.NullString // TEXT column, not DATETIME - must parse manually
 	var deletedBy sql.NullString
 	var deleteReason sql.NullString
 	var originalType sql.NullString
+	// Review fields
 	var reviewStatus sql.NullString
 	var reviewedBy sql.NullString
 	var reviewedAt sql.NullTime
+	// Messaging fields (bd-kwro)
+	var sender sql.NullString
+	var ephemeral sql.NullInt64
+	var repliesTo sql.NullString
+	var relatesTo sql.NullString
+	var duplicateOf sql.NullString
+	var supersededBy sql.NullString
 
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, content_hash, title, description, design, acceptance_criteria, notes,
@@ -359,7 +465,8 @@ func (s *SQLiteStorage) GetIssueByExternalRef(ctx context.Context, externalRef s
 		       created_at, updated_at, closed_at, external_ref,
 		       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason,
 		       deleted_at, deleted_by, delete_reason, original_type,
-		       review_status, reviewed_by, reviewed_at
+		       review_status, reviewed_by, reviewed_at,
+		       sender, ephemeral, replies_to, relates_to, duplicate_of, superseded_by
 		FROM issues
 		WHERE external_ref = ?
 	`, externalRef).Scan(
@@ -370,6 +477,7 @@ func (s *SQLiteStorage) GetIssueByExternalRef(ctx context.Context, externalRef s
 		&issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo, &closeReason,
 		&deletedAt, &deletedBy, &deleteReason, &originalType,
 		&reviewStatus, &reviewedBy, &reviewedAt,
+		&sender, &ephemeral, &repliesTo, &relatesTo, &duplicateOf, &supersededBy,
 	)
 
 	if err == sql.ErrNoRows {
@@ -410,9 +518,7 @@ func (s *SQLiteStorage) GetIssueByExternalRef(ctx context.Context, externalRef s
 	if closeReason.Valid {
 		issue.CloseReason = closeReason.String
 	}
-	if deletedAt.Valid {
-		issue.DeletedAt = &deletedAt.Time
-	}
+	issue.DeletedAt = parseNullableTimeString(deletedAt)
 	if deletedBy.Valid {
 		issue.DeletedBy = deletedBy.String
 	}
@@ -422,6 +528,7 @@ func (s *SQLiteStorage) GetIssueByExternalRef(ctx context.Context, externalRef s
 	if originalType.Valid {
 		issue.OriginalType = originalType.String
 	}
+	// Review fields
 	if reviewStatus.Valid {
 		issue.ReviewStatus = types.ReviewStatus(reviewStatus.String)
 	}
@@ -430,6 +537,25 @@ func (s *SQLiteStorage) GetIssueByExternalRef(ctx context.Context, externalRef s
 	}
 	if reviewedAt.Valid {
 		issue.ReviewedAt = &reviewedAt.Time
+	}
+	// Messaging fields (bd-kwro)
+	if sender.Valid {
+		issue.Sender = sender.String
+	}
+	if ephemeral.Valid && ephemeral.Int64 != 0 {
+		issue.Ephemeral = true
+	}
+	if repliesTo.Valid {
+		issue.RepliesTo = repliesTo.String
+	}
+	if relatesTo.Valid && relatesTo.String != "" {
+		issue.RelatesTo = parseJSONStringArray(relatesTo.String)
+	}
+	if duplicateOf.Valid {
+		issue.DuplicateOf = duplicateOf.String
+	}
+	if supersededBy.Valid {
+		issue.SupersededBy = supersededBy.String
 	}
 
 	// Fetch labels for this issue
@@ -456,9 +582,17 @@ var allowedUpdateFields = map[string]bool{
 	"estimated_minutes":   true,
 	"external_ref":        true,
 	"closed_at":           true,
+	// Review fields
 	"review_status":       true,
 	"reviewed_by":         true,
 	"reviewed_at":         true,
+	// Messaging fields (bd-kwro)
+	"sender":        true,
+	"ephemeral":     true,
+	"replies_to":    true,
+	"relates_to":    true,
+	"duplicate_of":  true,
+	"superseded_by": true,
 }
 
 // validatePriority validates a priority value
@@ -518,10 +652,13 @@ func manageClosedAt(oldIssue *types.Issue, updates map[string]interface{}, setCl
 		setClauses = append(setClauses, "closed_at = ?")
 		args = append(args, now)
 	} else if oldIssue.Status == types.StatusClosed {
-		// Changing from closed to something else: clear closed_at
+		// Changing from closed to something else: clear closed_at and close_reason
 		updates["closed_at"] = nil
 		setClauses = append(setClauses, "closed_at = ?")
 		args = append(args, nil)
+		updates["close_reason"] = ""
+		setClauses = append(setClauses, "close_reason = ?")
+		args = append(args, "")
 	}
 
 	return setClauses, args
@@ -824,10 +961,14 @@ func (s *SQLiteStorage) CloseIssue(ctx context.Context, id string, reason string
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// NOTE: close_reason is stored in two places:
+	// 1. issues.close_reason - for direct queries (bd show --json, exports)
+	// 2. events.comment - for audit history (when was it closed, by whom)
+	// Keep both in sync. If refactoring, consider deriving one from the other.
 	result, err := tx.ExecContext(ctx, `
-		UPDATE issues SET status = ?, closed_at = ?, updated_at = ?
+		UPDATE issues SET status = ?, closed_at = ?, updated_at = ?, close_reason = ?
 		WHERE id = ?
-	`, types.StatusClosed, now, now, id)
+	`, types.StatusClosed, now, now, reason, id)
 	if err != nil {
 		return fmt.Errorf("failed to close issue: %w", err)
 	}
@@ -891,9 +1032,12 @@ func (s *SQLiteStorage) CreateTombstone(ctx context.Context, id string, actor st
 	originalType := string(issue.IssueType)
 
 	// Convert issue to tombstone
+	// Note: closed_at must be set to NULL because of CHECK constraint:
+	// (status = 'closed') = (closed_at IS NOT NULL)
 	_, err = tx.ExecContext(ctx, `
 		UPDATE issues
 		SET status = ?,
+		    closed_at = NULL,
 		    deleted_at = ?,
 		    deleted_by = ?,
 		    delete_reason = ?,
@@ -1209,20 +1353,23 @@ func (s *SQLiteStorage) executeDelete(ctx context.Context, tx *sql.Tx, inClause 
 	for rows.Next() {
 		var id, issueType string
 		if err := rows.Scan(&id, &issueType); err != nil {
-			rows.Close()
+			_ = rows.Close() // #nosec G104 - error handling not critical in error path
 			return fmt.Errorf("failed to scan issue type: %w", err)
 		}
 		issueTypes[id] = issueType
 	}
-	rows.Close()
+	_ = rows.Close()
 
 	// 3. Convert issues to tombstones (only for issues that exist)
+	// Note: closed_at must be set to NULL because of CHECK constraint:
+	// (status = 'closed') = (closed_at IS NOT NULL)
 	now := time.Now()
 	deletedCount := 0
 	for id, originalType := range issueTypes {
 		execResult, err := tx.ExecContext(ctx, `
 			UPDATE issues
 			SET status = ?,
+			    closed_at = NULL,
 			    deleted_at = ?,
 			    deleted_by = ?,
 			    delete_reason = ?,
@@ -1310,6 +1457,9 @@ func (s *SQLiteStorage) findAllDependentsRecursive(ctx context.Context, tx *sql.
 
 // SearchIssues finds issues matching query and filters
 func (s *SQLiteStorage) SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error) {
+	// Check for external database file modifications (daemon mode)
+	s.checkFreshness()
+
 	whereClauses := []string{}
 	args := []interface{}{}
 
@@ -1438,6 +1588,15 @@ func (s *SQLiteStorage) SearchIssues(ctx context.Context, query string, filter t
 		whereClauses = append(whereClauses, fmt.Sprintf("id IN (%s)", strings.Join(placeholders, ", ")))
 	}
 
+	// Ephemeral filtering (bd-kwro.9)
+	if filter.Ephemeral != nil {
+		if *filter.Ephemeral {
+			whereClauses = append(whereClauses, "ephemeral = 1")
+		} else {
+			whereClauses = append(whereClauses, "(ephemeral = 0 OR ephemeral IS NULL)")
+		}
+	}
+
 	whereSQL := ""
 	if len(whereClauses) > 0 {
 		whereSQL = "WHERE " + strings.Join(whereClauses, " AND ")
@@ -1455,7 +1614,8 @@ func (s *SQLiteStorage) SearchIssues(ctx context.Context, query string, filter t
 		       status, priority, issue_type, assignee, estimated_minutes,
 		       created_at, updated_at, closed_at, external_ref, source_repo, close_reason,
 		       deleted_at, deleted_by, delete_reason, original_type,
-		       review_status, reviewed_by, reviewed_at
+		       review_status, reviewed_by, reviewed_at,
+		       sender, ephemeral, replies_to, relates_to, duplicate_of, superseded_by
 		FROM issues
 		%s
 		ORDER BY priority ASC, created_at DESC

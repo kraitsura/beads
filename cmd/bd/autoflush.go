@@ -19,6 +19,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 // outputJSON outputs data as pretty-printed JSON
@@ -42,12 +43,26 @@ func outputJSON(v interface{}) {
 //
 // Thread-safe: No shared state access.
 func findJSONLPath() string {
+	// Allow explicit override (useful in no-db mode or non-standard layouts)
+	if jsonlEnv := os.Getenv("BEADS_JSONL"); jsonlEnv != "" {
+		return utils.CanonicalizePath(jsonlEnv)
+	}
+
 	// Use public API for path discovery
 	jsonlPath := beads.FindJSONLPath(dbPath)
 
+	// In --no-db mode, dbPath may be empty. Fall back to locating the .beads directory.
+	if jsonlPath == "" {
+		beadsDir := beads.FindBeadsDir()
+		if beadsDir == "" {
+			return ""
+		}
+		jsonlPath = utils.FindJSONLInDir(beadsDir)
+	}
+
 	// Ensure the directory exists (important for new databases)
 	// This is the only difference from the public API - we create the directory
-	dbDir := filepath.Dir(dbPath)
+	dbDir := filepath.Dir(jsonlPath)
 	if err := os.MkdirAll(dbDir, 0750); err != nil {
 		// If we can't create the directory, return discovered path anyway
 		// (the subsequent write will fail with a clearer error)
@@ -177,7 +192,6 @@ func autoImportIfNewer() {
 		SkipUpdate:           false,
 		Strict:               false,
 		SkipPrefixValidation: true, // Auto-import is lenient about prefixes
-		NoGitHistory:         true, // Skip git history backfill during auto-import (bd-4pv)
 	}
 
 	result, err := importIssuesCore(ctx, dbPath, store, allIssues, opts)
@@ -386,10 +400,14 @@ func validateJSONLIntegrity(ctx context.Context, jsonlPath string) (bool, error)
 	jsonlData, err := os.ReadFile(jsonlPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// JSONL doesn't exist but we have a stored hash - clear export_hashes
+			// JSONL doesn't exist but we have a stored hash - clear export_hashes and jsonl_file_hash
 			fmt.Fprintf(os.Stderr, "⚠️  WARNING: JSONL file missing but export_hashes exist. Clearing export_hashes.\n")
 			if err := store.ClearAllExportHashes(ctx); err != nil {
 				return false, fmt.Errorf("failed to clear export_hashes: %w", err)
+			}
+			// Also clear jsonl_file_hash to prevent perpetual mismatch warnings (bd-admx)
+			if err := store.SetJSONLFileHash(ctx, ""); err != nil {
+				return false, fmt.Errorf("failed to clear jsonl_file_hash: %w", err)
 			}
 			return true, nil // Signal full export needed
 		}
@@ -406,10 +424,14 @@ func validateJSONLIntegrity(ctx context.Context, jsonlPath string) (bool, error)
 		fmt.Fprintf(os.Stderr, "⚠️  WARNING: JSONL file hash mismatch detected (bd-160)\n")
 		fmt.Fprintf(os.Stderr, "  This indicates JSONL and export_hashes are out of sync.\n")
 		fmt.Fprintf(os.Stderr, "  Clearing export_hashes to force full re-export.\n")
-		
+
 		// Clear export_hashes to force full re-export
 		if err := store.ClearAllExportHashes(ctx); err != nil {
 			return false, fmt.Errorf("failed to clear export_hashes: %w", err)
+		}
+		// Also clear jsonl_file_hash to prevent perpetual mismatch warnings (bd-admx)
+		if err := store.SetJSONLFileHash(ctx, ""); err != nil {
+			return false, fmt.Errorf("failed to clear jsonl_file_hash: %w", err)
 		}
 		return true, nil // Signal full export needed
 	}

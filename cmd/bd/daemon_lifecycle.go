@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/beads/internal/daemon"
 	"github.com/steveyegge/beads/internal/rpc"
 )
 
@@ -54,6 +55,17 @@ func showDaemonStatus(pidFile string) {
 			}
 		}
 
+		// Try to get detailed status from daemon via RPC
+		var rpcStatus *rpc.StatusResponse
+		beadsDir := filepath.Dir(pidFile)
+		socketPath := filepath.Join(beadsDir, "bd.sock")
+		if client, err := rpc.TryConnectWithTimeout(socketPath, 1*time.Second); err == nil && client != nil {
+			if status, err := client.Status(); err == nil {
+				rpcStatus = status
+			}
+			_ = client.Close()
+		}
+
 		if jsonOutput {
 			status := map[string]interface{}{
 				"running": true,
@@ -65,6 +77,14 @@ func showDaemonStatus(pidFile string) {
 			if logPath != "" {
 				status["log_path"] = logPath
 			}
+			// Add config from RPC status if available
+			if rpcStatus != nil {
+				status["auto_commit"] = rpcStatus.AutoCommit
+				status["auto_push"] = rpcStatus.AutoPush
+				status["local_mode"] = rpcStatus.LocalMode
+				status["sync_interval"] = rpcStatus.SyncInterval
+				status["daemon_mode"] = rpcStatus.DaemonMode
+			}
 			outputJSON(status)
 			return
 		}
@@ -75,6 +95,16 @@ func showDaemonStatus(pidFile string) {
 		}
 		if logPath != "" {
 			fmt.Printf("  Log: %s\n", logPath)
+		}
+		// Display config from RPC status if available
+		if rpcStatus != nil {
+			fmt.Printf("  Mode: %s\n", rpcStatus.DaemonMode)
+			fmt.Printf("  Sync Interval: %s\n", rpcStatus.SyncInterval)
+			fmt.Printf("  Auto-Commit: %v\n", rpcStatus.AutoCommit)
+			fmt.Printf("  Auto-Push: %v\n", rpcStatus.AutoPush)
+			if rpcStatus.LocalMode {
+				fmt.Printf("  Local Mode: %v (no git sync)\n", rpcStatus.LocalMode)
+			}
 		}
 	} else {
 		if jsonOutput {
@@ -273,6 +303,59 @@ func stopDaemon(pidFile string) {
 	}
 	
 	fmt.Println("Daemon killed")
+}
+
+// stopAllDaemons stops all running bd daemons (bd-47tn)
+func stopAllDaemons() {
+	// Discover all running daemons using the registry
+	daemons, err := daemon.DiscoverDaemons(nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error discovering daemons: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Filter to only alive daemons
+	var alive []daemon.DaemonInfo
+	for _, d := range daemons {
+		if d.Alive {
+			alive = append(alive, d)
+		}
+	}
+
+	if len(alive) == 0 {
+		if jsonOutput {
+			fmt.Println(`{"stopped": 0, "message": "No running daemons found"}`)
+		} else {
+			fmt.Println("No running daemons found")
+		}
+		return
+	}
+
+	if !jsonOutput {
+		fmt.Printf("Found %d running daemon(s), stopping...\n", len(alive))
+	}
+
+	// Stop all daemons (with force=true for stubborn processes)
+	results := daemon.KillAllDaemons(alive, true)
+
+	if jsonOutput {
+		output, _ := json.MarshalIndent(results, "", "  ")
+		fmt.Println(string(output))
+	} else {
+		if results.Stopped > 0 {
+			fmt.Printf("✓ Stopped %d daemon(s)\n", results.Stopped)
+		}
+		if results.Failed > 0 {
+			fmt.Printf("✗ Failed to stop %d daemon(s):\n", results.Failed)
+			for _, f := range results.Failures {
+				fmt.Printf("  - PID %d (%s): %s\n", f.PID, f.Workspace, f.Error)
+			}
+		}
+	}
+
+	if results.Failed > 0 {
+		os.Exit(1)
+	}
 }
 
 // startDaemon starts the daemon (in foreground if requested, otherwise background)

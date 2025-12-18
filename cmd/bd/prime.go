@@ -144,8 +144,9 @@ func outputMCPContext(w io.Writer, stealthMode bool) error {
 ` + closeProtocol + `
 
 ## Core Rules
-- Track ALL work in beads (no TodoWrite tool, no markdown TODOs)
-- Use bd MCP tools (mcp__plugin_beads_beads__*), not TodoWrite or markdown
+- Track strategic work in beads (multi-session, dependencies, discovered work)
+- TodoWrite is fine for simple single-session linear tasks
+- When in doubt, prefer bd—persistence you don't need beats lost context
 
 ## Context Control (Reduce Token Usage)
 - ` + "`brief=True`" + `: Returns only {id, title, status} - use when scanning
@@ -247,8 +248,9 @@ bd sync                     # Push to remote
 ` + closeNote + `
 
 ## Core Rules
-- Track ALL work in beads (no TodoWrite tool, no markdown TODOs)
-- Use ` + "`bd create`" + ` to create issues, not TodoWrite tool
+- Track strategic work in beads (multi-session, dependencies, discovered work)
+- Use ` + "`bd create`" + ` for issues, TodoWrite for simple single-session execution
+- When in doubt, prefer bd—persistence you don't need beats lost context
 - Git workflow: hooks auto-sync, run ` + "`bd sync`" + ` at session end
 - Session management: check ` + "`bd ready`" + ` for available work
 
@@ -261,7 +263,8 @@ bd sync                     # Push to remote
 - ` + "`bd show <id>`" + ` - Detailed issue view with dependencies
 
 ### Creating & Updating
-- ` + "`bd create --title=\"...\" --type=task|bug|feature`" + ` - New issue
+- ` + "`bd create --title=\"...\" --type=task|bug|feature --priority=2`" + ` - New issue
+  - Priority: 0-4 or P0-P4 (0=critical, 2=medium, 4=backlog). NOT "high"/"medium"/"low"
 - ` + "`bd update <id> --status=in_progress`" + ` - Claim work
 - ` + "`bd update <id> --assignee=username`" + ` - Assign to someone
 - ` + "`bd close <id>`" + ` - Mark complete

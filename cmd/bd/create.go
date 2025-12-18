@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/routing"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/types"
@@ -54,8 +55,11 @@ var createCmd = &cobra.Command{
 			FatalError("title required (or use --file to create from markdown)")
 		}
 
-		// Warn if creating a test issue in production database
-		if strings.HasPrefix(strings.ToLower(title), "test") {
+		// Get silent flag
+		silent, _ := cmd.Flags().GetBool("silent")
+
+		// Warn if creating a test issue in production database (unless silent mode)
+		if strings.HasPrefix(strings.ToLower(title), "test") && !silent && !debug.IsQuiet() {
 			yellow := color.New(color.FgYellow).SprintFunc()
 			fmt.Fprintf(os.Stderr, "%s Creating issue with 'Test' prefix in production database.\n", yellow("⚠"))
 			fmt.Fprintf(os.Stderr, "  For testing, consider using: BEADS_DB=/tmp/test.db ./bd create \"Test issue\"\n")
@@ -77,8 +81,8 @@ var createCmd = &cobra.Command{
 			description = tmpl.Description
 		}
 
-		// Warn if creating an issue without a description (unless it's a test issue)
-		if description == "" && !strings.Contains(strings.ToLower(title), "test") {
+		// Warn if creating an issue without a description (unless it's a test issue or silent mode)
+		if description == "" && !strings.Contains(strings.ToLower(title), "test") && !silent && !debug.IsQuiet() {
 			yellow := color.New(color.FgYellow).SprintFunc()
 			fmt.Fprintf(os.Stderr, "%s Creating issue without description.\n", yellow("⚠"))
 			fmt.Fprintf(os.Stderr, "  Issues without descriptions lack context for future work.\n")
@@ -247,13 +251,22 @@ var createCmd = &cobra.Command{
 				FatalError("%v", err)
 			}
 
+			// Parse response to get issue for hook
+			var issue types.Issue
+			if err := json.Unmarshal(resp.Data, &issue); err != nil {
+				FatalError("parsing response: %v", err)
+			}
+
+			// Run create hook (bd-kwro.8)
+			if hookRunner != nil {
+				hookRunner.Run(hooks.EventCreate, &issue)
+			}
+
 			if jsonOutput {
 				fmt.Println(string(resp.Data))
+			} else if silent {
+				fmt.Println(issue.ID)
 			} else {
-				var issue types.Issue
-				if err := json.Unmarshal(resp.Data, &issue); err != nil {
-					FatalError("parsing response: %v", err)
-				}
 				green := color.New(color.FgGreen).SprintFunc()
 				fmt.Printf("%s Created issue: %s\n", green("✓"), issue.ID)
 				fmt.Printf("  Title: %s\n", issue.Title)
@@ -384,8 +397,15 @@ var createCmd = &cobra.Command{
 		// Schedule auto-flush
 		markDirtyAndScheduleFlush()
 
+		// Run create hook (bd-kwro.8)
+		if hookRunner != nil {
+			hookRunner.Run(hooks.EventCreate, issue)
+		}
+
 		if jsonOutput {
 			outputJSON(issue)
+		} else if silent {
+			fmt.Println(issue.ID)
 		} else {
 			green := color.New(color.FgGreen).SprintFunc()
 			fmt.Printf("%s Created issue: %s\n", green("✓"), issue.ID)
@@ -403,6 +423,7 @@ func init() {
 	createCmd.Flags().StringP("file", "f", "", "Create multiple issues from markdown file")
 	createCmd.Flags().String("from-template", "", "Create issue from template (e.g., 'epic', 'bug', 'feature')")
 	createCmd.Flags().String("title", "", "Issue title (alternative to positional argument)")
+	createCmd.Flags().Bool("silent", false, "Output only the issue ID (for scripting)")
 	registerPriorityFlag(createCmd, "2")
 	createCmd.Flags().StringP("type", "t", "task", "Issue type (bug|feature|task|epic|chore)")
 	registerCommonIssueFlags(createCmd)

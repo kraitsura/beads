@@ -11,6 +11,7 @@
 - [Filtering & Search](#filtering--search)
 - [Advanced Operations](#advanced-operations)
 - [Database Management](#database-management)
+- [Editor Integration](#editor-integration)
 
 ## Basic Operations
 
@@ -249,7 +250,7 @@ bd --allow-stale list --status open --json
 
 ```bash
 # Force metadata update even when DB appears synced
-bd import --force -i .beads/beads.jsonl
+bd import --force -i .beads/issues.jsonl
 ```
 
 **When to use:** `bd import` reports "0 created, 0 updated" but staleness errors persist.
@@ -549,6 +550,48 @@ bd sync  # Force immediate sync, bypass debounce
 ```
 
 **ALWAYS run `bd sync` at end of agent sessions** to ensure changes are committed/pushed immediately.
+
+## Editor Integration
+
+### Setup Commands
+
+```bash
+# Setup editor integration (choose based on your editor)
+bd setup factory  # Factory.ai Droid - creates/updates AGENTS.md (universal standard)
+bd setup claude   # Claude Code - installs SessionStart/PreCompact hooks
+bd setup cursor   # Cursor IDE - creates .cursor/rules/beads.mdc
+bd setup aider    # Aider - creates .aider.conf.yml
+
+# Check if integration is installed
+bd setup factory --check
+bd setup claude --check
+bd setup cursor --check
+bd setup aider --check
+
+# Remove integration
+bd setup factory --remove
+bd setup claude --remove
+bd setup cursor --remove
+bd setup aider --remove
+```
+
+**Claude Code options:**
+```bash
+bd setup claude              # Install globally (~/.claude/settings.json)
+bd setup claude --project    # Install for this project only
+bd setup claude --stealth    # Use stealth mode (flush only, no git operations)
+```
+
+**What each setup does:**
+- **Factory.ai** (`bd setup factory`): Creates or updates AGENTS.md with beads workflow instructions (works with multiple AI tools using the AGENTS.md standard)
+- **Claude Code** (`bd setup claude`): Adds hooks to Claude Code's settings.json that run `bd prime` on SessionStart and PreCompact events
+- **Cursor** (`bd setup cursor`): Creates `.cursor/rules/beads.mdc` with workflow instructions
+- **Aider** (`bd setup aider`): Creates `.aider.conf.yml` with bd workflow instructions
+
+See also:
+- [INSTALLING.md](INSTALLING.md#ide-and-editor-integrations) - Installation guide
+- [AIDER_INTEGRATION.md](AIDER_INTEGRATION.md) - Detailed Aider guide
+- [CLAUDE_INTEGRATION.md](CLAUDE_INTEGRATION.md) - Claude integration design
 
 ## See Also
 

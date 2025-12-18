@@ -38,6 +38,7 @@ var migrationsList = []Migration{
 	{"review_columns", migrations.MigrateReviewColumns},
 	{"reviews_table", migrations.MigrateReviewsTable},
 	{"review_sessions_table", migrations.MigrateReviewSessionsTable},
+	{"messaging_fields", migrations.MigrateMessagingFields},
 }
 
 // MigrationInfo contains metadata about a migration for inspection
@@ -83,6 +84,7 @@ func getMigrationDescription(name string) string {
 		"review_columns":               "Adds review workflow columns (review_status, reviewed_by, reviewed_at) for plan approval workflow",
 		"reviews_table":                "Adds reviews table for local review history (not exported to JSONL)",
 		"review_sessions_table":        "Adds review_sessions table for grouping batch reviews (not exported to JSONL)",
+		"messaging_fields":             "Adds messaging fields (sender, ephemeral, replies_to, relates_to, duplicate_of, superseded_by) for inter-agent communication (bd-kwro)",
 	}
 	
 	if desc, ok := descriptions[name]; ok {

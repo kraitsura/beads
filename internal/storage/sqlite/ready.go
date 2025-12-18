@@ -101,7 +101,8 @@ func (s *SQLiteStorage) GetReadyWork(ctx context.Context, filter types.WorkFilte
 		i.status, i.priority, i.issue_type, i.assignee, i.estimated_minutes,
 		i.created_at, i.updated_at, i.closed_at, i.external_ref, i.source_repo, i.close_reason,
 		i.deleted_at, i.deleted_by, i.delete_reason, i.original_type,
-		i.review_status, i.reviewed_by, i.reviewed_at
+		i.review_status, i.reviewed_by, i.reviewed_at,
+		i.sender, i.ephemeral, i.replies_to, i.relates_to, i.duplicate_of, i.superseded_by
 		FROM issues i
 		WHERE %s
 		AND NOT EXISTS (
@@ -130,7 +131,8 @@ func (s *SQLiteStorage) GetStaleIssues(ctx context.Context, filter types.StaleFi
 			created_at, updated_at, closed_at, external_ref, source_repo,
 			compaction_level, compacted_at, compacted_at_commit, original_size, close_reason,
 			deleted_at, deleted_by, delete_reason, original_type,
-			review_status, reviewed_by, reviewed_at
+			review_status, reviewed_by, reviewed_at,
+			sender, ephemeral, replies_to, relates_to, duplicate_of, superseded_by
 		FROM issues
 		WHERE status != 'closed'
 		  AND datetime(updated_at) < datetime('now', '-' || ? || ' days')
@@ -172,13 +174,21 @@ func (s *SQLiteStorage) GetStaleIssues(ctx context.Context, filter types.StaleFi
 		var compactedAtCommit sql.NullString
 		var originalSize sql.NullInt64
 		var closeReason sql.NullString
-		var deletedAt sql.NullTime
+		var deletedAt sql.NullString // TEXT column, not DATETIME - must parse manually
 		var deletedBy sql.NullString
 		var deleteReason sql.NullString
 		var originalType sql.NullString
+		// Review fields
 		var reviewStatus sql.NullString
 		var reviewedBy sql.NullString
 		var reviewedAt sql.NullTime
+		// Messaging fields (bd-kwro)
+		var sender sql.NullString
+		var ephemeral sql.NullInt64
+		var repliesTo sql.NullString
+		var relatesTo sql.NullString
+		var duplicateOf sql.NullString
+		var supersededBy sql.NullString
 
 		err := rows.Scan(
 			&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Design,
@@ -188,6 +198,7 @@ func (s *SQLiteStorage) GetStaleIssues(ctx context.Context, filter types.StaleFi
 			&compactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &closeReason,
 			&deletedAt, &deletedBy, &deleteReason, &originalType,
 			&reviewStatus, &reviewedBy, &reviewedAt,
+			&sender, &ephemeral, &repliesTo, &relatesTo, &duplicateOf, &supersededBy,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan stale issue: %w", err)
@@ -227,9 +238,7 @@ func (s *SQLiteStorage) GetStaleIssues(ctx context.Context, filter types.StaleFi
 		if closeReason.Valid {
 			issue.CloseReason = closeReason.String
 		}
-		if deletedAt.Valid {
-			issue.DeletedAt = &deletedAt.Time
-		}
+		issue.DeletedAt = parseNullableTimeString(deletedAt)
 		if deletedBy.Valid {
 			issue.DeletedBy = deletedBy.String
 		}
@@ -239,6 +248,7 @@ func (s *SQLiteStorage) GetStaleIssues(ctx context.Context, filter types.StaleFi
 		if originalType.Valid {
 			issue.OriginalType = originalType.String
 		}
+		// Review fields
 		if reviewStatus.Valid {
 			issue.ReviewStatus = types.ReviewStatus(reviewStatus.String)
 		}
@@ -248,6 +258,25 @@ func (s *SQLiteStorage) GetStaleIssues(ctx context.Context, filter types.StaleFi
 		if reviewedAt.Valid {
 			issue.ReviewedAt = &reviewedAt.Time
 		}
+		// Messaging fields (bd-kwro)
+		if sender.Valid {
+			issue.Sender = sender.String
+		}
+		if ephemeral.Valid && ephemeral.Int64 != 0 {
+			issue.Ephemeral = true
+		}
+		if repliesTo.Valid {
+			issue.RepliesTo = repliesTo.String
+		}
+		if relatesTo.Valid && relatesTo.String != "" {
+			issue.RelatesTo = parseJSONStringArray(relatesTo.String)
+		}
+		if duplicateOf.Valid {
+			issue.DuplicateOf = duplicateOf.String
+		}
+		if supersededBy.Valid {
+			issue.SupersededBy = supersededBy.String
+		}
 
 		issues = append(issues, &issue)
 	}
@@ -255,22 +284,38 @@ func (s *SQLiteStorage) GetStaleIssues(ctx context.Context, filter types.StaleFi
 	return issues, rows.Err()
 }
 
-// GetBlockedIssues returns issues that are blocked by dependencies
+// GetBlockedIssues returns issues that are blocked by dependencies or have status=blocked
 func (s *SQLiteStorage) GetBlockedIssues(ctx context.Context) ([]*types.BlockedIssue, error) {
+	// Use UNION to combine:
+	// 1. Issues with open/in_progress/blocked status that have dependency blockers
+	// 2. Issues with status=blocked (even if they have no dependency blockers)
 	// Use GROUP_CONCAT to get all blocker IDs in a single query (no N+1)
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT
 		    i.id, i.title, i.description, i.design, i.acceptance_criteria, i.notes,
 		    i.status, i.priority, i.issue_type, i.assignee, i.estimated_minutes,
 		    i.created_at, i.updated_at, i.closed_at, i.external_ref, i.source_repo,
-		    COUNT(d.depends_on_id) as blocked_by_count,
-		    GROUP_CONCAT(d.depends_on_id, ',') as blocker_ids
+		    COALESCE(COUNT(d.depends_on_id), 0) as blocked_by_count,
+		    COALESCE(GROUP_CONCAT(d.depends_on_id, ','), '') as blocker_ids
 		FROM issues i
-		JOIN dependencies d ON i.id = d.issue_id
-		JOIN issues blocker ON d.depends_on_id = blocker.id
+		LEFT JOIN dependencies d ON i.id = d.issue_id
+		    AND d.type = 'blocks'
+		    AND EXISTS (
+		        SELECT 1 FROM issues blocker
+		        WHERE blocker.id = d.depends_on_id
+		        AND blocker.status IN ('open', 'in_progress', 'blocked')
+		    )
 		WHERE i.status IN ('open', 'in_progress', 'blocked')
-		  AND d.type = 'blocks'
-		  AND blocker.status IN ('open', 'in_progress', 'blocked')
+		  AND (
+		      i.status = 'blocked'
+		      OR EXISTS (
+		          SELECT 1 FROM dependencies d2
+		          JOIN issues blocker ON d2.depends_on_id = blocker.id
+		          WHERE d2.issue_id = i.id
+		            AND d2.type = 'blocks'
+		            AND blocker.status IN ('open', 'in_progress', 'blocked')
+		      )
+		  )
 		GROUP BY i.id
 		ORDER BY i.priority ASC
 	`)
@@ -320,6 +365,8 @@ func (s *SQLiteStorage) GetBlockedIssues(ctx context.Context) ([]*types.BlockedI
 		// Parse comma-separated blocker IDs
 		if blockerIDsStr != "" {
 			issue.BlockedBy = strings.Split(blockerIDsStr, ",")
+		} else {
+			issue.BlockedBy = []string{}
 		}
 
 		blocked = append(blocked, &issue)

@@ -28,6 +28,15 @@ func shouldAutoStartDaemon() bool {
 		return false // Explicit opt-out
 	}
 
+	// Check if we're in a git worktree without sync-branch configured.
+	// In this case, daemon is unsafe because all worktrees share the same
+	// .beads directory and the daemon would commit to the wrong branch.
+	// When sync-branch is configured, daemon is safe because commits go
+	// to a dedicated branch via an internal worktree.
+	if shouldDisableDaemonForWorktree() {
+		return false
+	}
+
 	// Use viper to read from config file or BEADS_AUTO_START_DAEMON env var
 	// Viper handles BEADS_AUTO_START_DAEMON automatically via BindEnv
 	return config.GetBool("auto-start-daemon") // Defaults to true
@@ -183,7 +192,18 @@ func acquireStartLock(lockPath, socketPath string) bool {
 	// nolint:gosec // G304: lockPath is derived from secure beads directory
 	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
-		debugLog("another process is starting daemon, waiting for readiness")
+		// Lock file exists - check if it's from a dead process (stale) or alive daemon
+		lockPID, pidErr := readPIDFromFile(lockPath)
+		if pidErr != nil || !isPIDAlive(lockPID) {
+			// Stale lock from crashed process - clean up immediately (avoids 5s wait)
+			debugLog("startlock is stale (PID %d dead or unreadable), cleaning up", lockPID)
+			_ = os.Remove(lockPath)
+			// Retry lock acquisition after cleanup
+			return acquireStartLock(lockPath, socketPath)
+		}
+
+		// PID is alive - daemon is legitimately starting, wait for socket to be ready
+		debugLog("another process (PID %d) is starting daemon, waiting for readiness", lockPID)
 		if waitForSocketReadiness(socketPath, 5*time.Second) {
 			return true
 		}
@@ -378,6 +398,9 @@ func emitVerboseWarning() {
 		fmt.Fprintf(os.Stderr, "Warning: Failed to auto-start daemon. Running in direct mode. Hint: bd daemon --status\n")
 	case FallbackDaemonUnsupported:
 		fmt.Fprintf(os.Stderr, "Warning: Daemon does not support this command yet. Running in direct mode. Hint: update daemon or use local mode.\n")
+	case FallbackWorktreeSafety:
+		// Don't warn - this is expected behavior. User can configure sync-branch to enable daemon.
+		return
 	case FallbackFlagNoDaemon:
 		// Don't warn when user explicitly requested --no-daemon
 		return

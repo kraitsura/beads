@@ -12,7 +12,7 @@
         "repo": "kraitsura/beads"
       },
       "description": "AI-supervised issue tracker for coding workflows with brief output, suggest_next, and improved context control.",
-      "version": "0.31.0"
+      "version": "0.32.0"
     }
   ]
 }

@@ -197,7 +197,6 @@ func importToJSONLWithStore(ctx context.Context, store storage.Storage, jsonlPat
 		SkipUpdate:           false,
 		Strict:               false,
 		SkipPrefixValidation: true, // Skip prefix validation for auto-import
-		NoGitHistory:         true, // Skip git history backfill during auto-import (bd-4pv)
 	}
 
 	_, err = importIssuesCore(ctx, "", store, issues, opts)
@@ -359,12 +358,16 @@ This usually means:
   3. Database corruption
   4. bd was upgraded and URL canonicalization changed
 
+⚠️  CRITICAL: This mismatch can cause beads to incorrectly delete issues during sync!
+   The git-history-backfill mechanism may treat your local issues as deleted
+   because they don't exist in the remote repository's history.
+
 Solutions:
   - If remote URL changed: bd migrate --update-repo-id
   - If bd was upgraded: bd migrate --update-repo-id
   - If wrong database: rm -rf .beads && bd init
   - If correct database: BEADS_IGNORE_REPO_MISMATCH=1 bd daemon
-    (Warning: This can cause data corruption across clones!)
+    (Warning: This can cause data corruption and unwanted deletions across clones!)
 `, storedRepoID[:8], currentRepoID[:8])
 	}
 
@@ -455,7 +458,10 @@ func performExport(ctx context.Context, store storage.Storage, autoCommit, autoP
 		// Auto-commit if enabled (skip in git-free mode)
 		if autoCommit && !skipGit {
 			// Try sync branch commit first
-			committed, err := syncBranchCommitAndPush(exportCtx, store, autoPush, log)
+			// Use forceOverwrite=true because mutation-triggered exports (create, update, delete)
+			// mean the local state is authoritative and should not be merged with worktree.
+			// This is critical for delete mutations to be properly reflected in the sync branch.
+			committed, err := syncBranchCommitAndPushWithOptions(exportCtx, store, autoPush, true, log)
 			if err != nil {
 				log.log("Sync branch commit failed: %v", err)
 				return
@@ -555,6 +561,18 @@ func performAutoImport(ctx context.Context, store storage.Storage, skipGit bool,
 
 		// Pull from git if not in git-free mode
 		if !skipGit {
+			// SAFETY CHECK (bd-k92d): Warn if there are uncommitted local changes
+			// This helps detect race conditions where local work hasn't been pushed yet
+			jsonlPath := findJSONLPath()
+			if jsonlPath != "" {
+				if hasLocalChanges, err := gitHasChanges(importCtx, jsonlPath); err == nil && hasLocalChanges {
+					log.log("⚠️  WARNING: Uncommitted local changes detected in %s", jsonlPath)
+					log.log("   Pulling from remote may overwrite local unpushed changes.")
+					log.log("   Consider running 'bd sync' to commit and push your changes first.")
+					// Continue anyway, but user has been warned
+				}
+			}
+
 			// Try sync branch first
 			pulled, err := syncBranchPull(importCtx, store, log)
 			if err != nil {

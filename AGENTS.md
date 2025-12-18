@@ -332,6 +332,47 @@ bd close bd-42 "Done"                       # Updates via git sync
 
 See [docs/AGENT_MAIL_QUICKSTART.md](docs/AGENT_MAIL_QUICKSTART.md) for 5-minute setup, or [docs/AGENT_MAIL.md](docs/AGENT_MAIL.md) for complete documentation. Example code in [examples/python-agent/AGENT_MAIL_EXAMPLE.md](examples/python-agent/AGENT_MAIL_EXAMPLE.md).
 
+### Inter-Agent Messaging (bd mail)
+
+Beads includes a built-in messaging system for direct agent-to-agent communication. Messages are stored as beads issues, synced via git.
+
+**Setup:**
+
+```bash
+# Set your identity (add to environment or .beads/config.json)
+export BEADS_IDENTITY="worker-1"
+```
+
+**Commands:**
+
+```bash
+# Send a message
+bd mail send <recipient> -s "Subject" -m "Body"
+bd mail send worker-2 -s "Handoff" -m "Your turn on bd-xyz" --urgent
+
+# Check your inbox
+bd mail inbox
+
+# Read a specific message
+bd mail read bd-a1b2
+
+# Acknowledge (mark as read/close)
+bd mail ack bd-a1b2
+
+# Reply to a message (creates thread)
+bd mail reply bd-a1b2 -m "Thanks, on it!"
+```
+
+**Use cases:**
+- Task handoffs between agents
+- Status updates to coordinator
+- Blocking questions requiring response
+- Priority signaling with `--urgent` flag
+
+**Cleanup:** Messages are ephemeral. Run `bd cleanup --ephemeral --force` to delete closed messages.
+
+See [docs/messaging.md](docs/messaging.md) for full documentation.
+
 ### Deletion Tracking
 
 When issues are deleted (via `bd delete` or `bd cleanup`), they are recorded in `.beads/deletions.jsonl`. This manifest:
@@ -378,10 +419,19 @@ bd deleted --json              # Machine-readable output
 
 ### Dependency Types
 
+**Blocking dependencies:**
 - `blocks` - Hard dependency (issue X blocks issue Y)
-- `related` - Soft relationship (issues are connected)
+
+**Structural relationships:**
 - `parent-child` - Epic/subtask relationship
 - `discovered-from` - Track issues discovered during work (automatically inherits parent's `source_repo`)
+- `related` - Soft relationship (issues are connected)
+
+**Graph links:** (see [docs/graph-links.md](docs/graph-links.md))
+- `relates_to` - Bidirectional "see also" links (`bd relate <id1> <id2>`)
+- `duplicates` - Mark issue as duplicate (`bd duplicate <id> --of <canonical>`)
+- `supersedes` - Version chains (`bd supersede <old> --with <new>`)
+- `replies_to` - Message threads (`bd mail reply`)
 
 Only `blocks` dependencies affect the ready work queue.
 
@@ -526,7 +576,7 @@ bd show bd-41 --json  # Verify merged content
 
 **Quick reference:**
 
-- **Go version**: 1.21+
+- **Go version**: 1.24+
 - **Testing**: Use `BEADS_DB=/tmp/test.db` to avoid polluting production database
 - **Before committing**: Run tests (`go test -short ./...`) and linter (`golangci-lint run ./...`)
 - **End of session**: Always run `bd sync` to flush/commit/push changes
@@ -749,6 +799,32 @@ history/
 - ❌ Do NOT duplicate tracking systems
 - ❌ Do NOT clutter repo root with planning documents
 
-For more details, see README.md and QUICKSTART.md.
+For more details, see README.md and docs/QUICKSTART.md.
 
 <!-- /bd onboard section -->
+
+## Landing the Plane (Session Completion)
+
+**When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
+
+**MANDATORY WORKFLOW:**
+
+1. **File issues for remaining work** - Create issues for anything that needs follow-up
+2. **Run quality gates** (if code changed) - Tests, linters, builds
+3. **Update issue status** - Close finished work, update in-progress items
+4. **PUSH TO REMOTE** - This is MANDATORY:
+   ```bash
+   git pull --rebase
+   bd sync
+   git push
+   git status  # MUST show "up to date with origin"
+   ```
+5. **Clean up** - Clear stashes, prune remote branches
+6. **Verify** - All changes committed AND pushed
+7. **Hand off** - Provide context for next session
+
+**CRITICAL RULES:**
+- Work is NOT complete until `git push` succeeds
+- NEVER stop before pushing - that leaves work stranded locally
+- NEVER say "ready to push when you are" - YOU must push
+- If push fails, resolve and retry until it succeeds

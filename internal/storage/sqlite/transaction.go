@@ -97,15 +97,40 @@ func (t *sqliteTxStorage) CreateIssue(ctx context.Context, issue *types.Issue, a
 		return fmt.Errorf("failed to get custom statuses: %w", err)
 	}
 
+	// Set timestamps first so defensive fixes can use them
+	now := time.Now()
+	if issue.CreatedAt.IsZero() {
+		issue.CreatedAt = now
+	}
+	if issue.UpdatedAt.IsZero() {
+		issue.UpdatedAt = now
+	}
+
+	// Defensive fix for closed_at invariant (GH#523): older versions of bd could
+	// close issues without setting closed_at. Fix by using max(created_at, updated_at) + 1s.
+	if issue.Status == types.StatusClosed && issue.ClosedAt == nil {
+		maxTime := issue.CreatedAt
+		if issue.UpdatedAt.After(maxTime) {
+			maxTime = issue.UpdatedAt
+		}
+		closedAt := maxTime.Add(time.Second)
+		issue.ClosedAt = &closedAt
+	}
+
+	// Defensive fix for deleted_at invariant: tombstones must have deleted_at
+	if issue.Status == types.StatusTombstone && issue.DeletedAt == nil {
+		maxTime := issue.CreatedAt
+		if issue.UpdatedAt.After(maxTime) {
+			maxTime = issue.UpdatedAt
+		}
+		deletedAt := maxTime.Add(time.Second)
+		issue.DeletedAt = &deletedAt
+	}
+
 	// Validate issue before creating (with custom status support)
 	if err := issue.ValidateWithCustomStatuses(customStatuses); err != nil {
 		return fmt.Errorf("validation failed: %w", err)
 	}
-
-	// Set timestamps
-	now := time.Now()
-	issue.CreatedAt = now
-	issue.UpdatedAt = now
 
 	// Compute content hash (bd-95)
 	if issue.ContentHash == "" {
@@ -137,7 +162,8 @@ func (t *sqliteTxStorage) CreateIssue(ctx context.Context, issue *types.Issue, a
 		}
 
 		// For hierarchical IDs (bd-a3f8e9.1), ensure parent exists
-		if strings.Contains(issue.ID, ".") {
+		// Use IsHierarchicalID to correctly handle prefixes with dots (GH#508)
+		if isHierarchical, parentID := IsHierarchicalID(issue.ID); isHierarchical {
 			// Try to resurrect entire parent chain if any parents are missing
 			resurrected, err := t.parent.tryResurrectParentChainWithConn(ctx, t.conn, issue.ID)
 			if err != nil {
@@ -145,8 +171,6 @@ func (t *sqliteTxStorage) CreateIssue(ctx context.Context, issue *types.Issue, a
 			}
 			if !resurrected {
 				// Parent(s) not found in JSONL history - cannot proceed
-				lastDot := strings.LastIndex(issue.ID, ".")
-				parentID := issue.ID[:lastDot]
 				return fmt.Errorf("parent issue %s does not exist and could not be resurrected from JSONL history", parentID)
 			}
 		}
@@ -185,11 +209,38 @@ func (t *sqliteTxStorage) CreateIssues(ctx context.Context, issues []*types.Issu
 	// Validate and prepare all issues first (with custom status support)
 	now := time.Now()
 	for _, issue := range issues {
+		// Set timestamps first so defensive fixes can use them
+		if issue.CreatedAt.IsZero() {
+			issue.CreatedAt = now
+		}
+		if issue.UpdatedAt.IsZero() {
+			issue.UpdatedAt = now
+		}
+
+		// Defensive fix for closed_at invariant (GH#523): older versions of bd could
+		// close issues without setting closed_at. Fix by using max(created_at, updated_at) + 1s.
+		if issue.Status == types.StatusClosed && issue.ClosedAt == nil {
+			maxTime := issue.CreatedAt
+			if issue.UpdatedAt.After(maxTime) {
+				maxTime = issue.UpdatedAt
+			}
+			closedAt := maxTime.Add(time.Second)
+			issue.ClosedAt = &closedAt
+		}
+
+		// Defensive fix for deleted_at invariant: tombstones must have deleted_at
+		if issue.Status == types.StatusTombstone && issue.DeletedAt == nil {
+			maxTime := issue.CreatedAt
+			if issue.UpdatedAt.After(maxTime) {
+				maxTime = issue.UpdatedAt
+			}
+			deletedAt := maxTime.Add(time.Second)
+			issue.DeletedAt = &deletedAt
+		}
+
 		if err := issue.ValidateWithCustomStatuses(customStatuses); err != nil {
 			return fmt.Errorf("validation failed for issue: %w", err)
 		}
-		issue.CreatedAt = now
-		issue.UpdatedAt = now
 		if issue.ContentHash == "" {
 			issue.ContentHash = issue.ComputeContentHash()
 		}
@@ -255,7 +306,8 @@ func (t *sqliteTxStorage) GetIssue(ctx context.Context, id string) (*types.Issue
 		       created_at, updated_at, closed_at, external_ref,
 		       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason,
 		       deleted_at, deleted_by, delete_reason, original_type,
-		       review_status, reviewed_by, reviewed_at
+		       review_status, reviewed_by, reviewed_at,
+		       sender, ephemeral, replies_to, relates_to, duplicate_of, superseded_by
 		FROM issues
 		WHERE id = ?
 	`, id)
@@ -463,13 +515,14 @@ func applyUpdatesToIssue(issue *types.Issue, updates map[string]interface{}) {
 }
 
 // CloseIssue closes an issue within the transaction.
+// NOTE: close_reason is stored in both issues table and events table - see SQLiteStorage.CloseIssue.
 func (t *sqliteTxStorage) CloseIssue(ctx context.Context, id string, reason string, actor string) error {
 	now := time.Now()
 
 	result, err := t.conn.ExecContext(ctx, `
-		UPDATE issues SET status = ?, closed_at = ?, updated_at = ?
+		UPDATE issues SET status = ?, closed_at = ?, updated_at = ?, close_reason = ?
 		WHERE id = ?
-	`, types.StatusClosed, now, now, id)
+	`, types.StatusClosed, now, now, reason, id)
 	if err != nil {
 		return fmt.Errorf("failed to close issue: %w", err)
 	}
@@ -1016,6 +1069,15 @@ func (t *sqliteTxStorage) SearchIssues(ctx context.Context, query string, filter
 		whereClauses = append(whereClauses, fmt.Sprintf("id IN (%s)", strings.Join(placeholders, ", ")))
 	}
 
+	// Ephemeral filtering (bd-kwro.9)
+	if filter.Ephemeral != nil {
+		if *filter.Ephemeral {
+			whereClauses = append(whereClauses, "ephemeral = 1")
+		} else {
+			whereClauses = append(whereClauses, "(ephemeral = 0 OR ephemeral IS NULL)")
+		}
+	}
+
 	whereSQL := ""
 	if len(whereClauses) > 0 {
 		whereSQL = "WHERE " + strings.Join(whereClauses, " AND ")
@@ -1034,7 +1096,8 @@ func (t *sqliteTxStorage) SearchIssues(ctx context.Context, query string, filter
 		       created_at, updated_at, closed_at, external_ref,
 		       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason,
 		       deleted_at, deleted_by, delete_reason, original_type,
-		       review_status, reviewed_by, reviewed_at
+		       review_status, reviewed_by, reviewed_at,
+		       sender, ephemeral, replies_to, relates_to, duplicate_of, superseded_by
 		FROM issues
 		%s
 		ORDER BY priority ASC, created_at DESC
@@ -1070,13 +1133,21 @@ func scanIssueRow(row scanner) (*types.Issue, error) {
 	var sourceRepo sql.NullString
 	var compactedAtCommit sql.NullString
 	var closeReason sql.NullString
-	var deletedAt sql.NullTime
+	var deletedAt sql.NullString // TEXT column, not DATETIME - must parse manually
 	var deletedBy sql.NullString
 	var deleteReason sql.NullString
 	var originalType sql.NullString
+	// Review fields
 	var reviewStatus sql.NullString
 	var reviewedBy sql.NullString
 	var reviewedAt sql.NullTime
+	// Messaging fields (bd-kwro)
+	var sender sql.NullString
+	var ephemeral sql.NullInt64
+	var repliesTo sql.NullString
+	var relatesTo sql.NullString
+	var duplicateOf sql.NullString
+	var supersededBy sql.NullString
 
 	err := row.Scan(
 		&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Design,
@@ -1086,6 +1157,7 @@ func scanIssueRow(row scanner) (*types.Issue, error) {
 		&issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo, &closeReason,
 		&deletedAt, &deletedBy, &deleteReason, &originalType,
 		&reviewStatus, &reviewedBy, &reviewedAt,
+		&sender, &ephemeral, &repliesTo, &relatesTo, &duplicateOf, &supersededBy,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to scan issue: %w", err)
@@ -1122,9 +1194,7 @@ func scanIssueRow(row scanner) (*types.Issue, error) {
 	if closeReason.Valid {
 		issue.CloseReason = closeReason.String
 	}
-	if deletedAt.Valid {
-		issue.DeletedAt = &deletedAt.Time
-	}
+	issue.DeletedAt = parseNullableTimeString(deletedAt)
 	if deletedBy.Valid {
 		issue.DeletedBy = deletedBy.String
 	}
@@ -1134,6 +1204,7 @@ func scanIssueRow(row scanner) (*types.Issue, error) {
 	if originalType.Valid {
 		issue.OriginalType = originalType.String
 	}
+	// Review fields
 	if reviewStatus.Valid {
 		issue.ReviewStatus = types.ReviewStatus(reviewStatus.String)
 	}
@@ -1142,6 +1213,25 @@ func scanIssueRow(row scanner) (*types.Issue, error) {
 	}
 	if reviewedAt.Valid {
 		issue.ReviewedAt = &reviewedAt.Time
+	}
+	// Messaging fields (bd-kwro)
+	if sender.Valid {
+		issue.Sender = sender.String
+	}
+	if ephemeral.Valid && ephemeral.Int64 != 0 {
+		issue.Ephemeral = true
+	}
+	if repliesTo.Valid {
+		issue.RepliesTo = repliesTo.String
+	}
+	if relatesTo.Valid && relatesTo.String != "" {
+		issue.RelatesTo = parseJSONStringArray(relatesTo.String)
+	}
+	if duplicateOf.Valid {
+		issue.DuplicateOf = duplicateOf.String
+	}
+	if supersededBy.Valid {
+		issue.SupersededBy = supersededBy.String
 	}
 
 	return &issue, nil

@@ -1,6 +1,7 @@
 package rpc
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -72,6 +73,19 @@ func updatesFromArgs(a UpdateArgs) map[string]interface{} {
 	}
 	if a.EstimatedMinutes != nil {
 		u["estimated_minutes"] = *a.EstimatedMinutes
+	}
+	if a.IssueType != nil {
+		u["issue_type"] = *a.IssueType
+	}
+	// Messaging fields (bd-kwro)
+	if a.Sender != nil {
+		u["sender"] = *a.Sender
+	}
+	if a.Ephemeral != nil {
+		u["ephemeral"] = *a.Ephemeral
+	}
+	if a.RepliesTo != nil {
+		u["replies_to"] = *a.RepliesTo
 	}
 	return u
 }
@@ -147,6 +161,10 @@ func (s *Server) handleCreate(req *Request) Response {
 		ExternalRef:        externalRef,
 		EstimatedMinutes:   createArgs.EstimatedMinutes,
 		Status:             types.StatusOpen,
+		// Messaging fields (bd-kwro)
+		Sender:    createArgs.Sender,
+		Ephemeral: createArgs.Ephemeral,
+		RepliesTo: createArgs.RepliesTo,
 	}
 	
 	// Check if any dependencies are discovered-from type
@@ -411,6 +429,114 @@ func (s *Server) handleClose(req *Request) Response {
 
 	issue, _ := store.GetIssue(ctx, closeArgs.ID)
 	data, _ := json.Marshal(issue)
+	return Response{
+		Success: true,
+		Data:    data,
+	}
+}
+
+func (s *Server) handleDelete(req *Request) Response {
+	var deleteArgs DeleteArgs
+	if err := json.Unmarshal(req.Args, &deleteArgs); err != nil {
+		return Response{
+			Success: false,
+			Error:   fmt.Sprintf("invalid delete args: %v", err),
+		}
+	}
+
+	store := s.storage
+	if store == nil {
+		return Response{
+			Success: false,
+			Error:   "storage not available (global daemon deprecated - use local daemon instead with 'bd daemon' in your project)",
+		}
+	}
+
+	// Validate that we have issue IDs to delete
+	if len(deleteArgs.IDs) == 0 {
+		return Response{
+			Success: false,
+			Error:   "no issue IDs provided for deletion",
+		}
+	}
+
+	// DryRun mode: just return what would be deleted
+	if deleteArgs.DryRun {
+		data, _ := json.Marshal(map[string]interface{}{
+			"dry_run":     true,
+			"issue_count": len(deleteArgs.IDs),
+			"issues":      deleteArgs.IDs,
+		})
+		return Response{
+			Success: true,
+			Data:    data,
+		}
+	}
+
+	ctx := s.reqCtx(req)
+	deletedCount := 0
+	errors := make([]string, 0)
+
+	// Delete each issue
+	for _, issueID := range deleteArgs.IDs {
+		// Verify issue exists before deleting
+		issue, err := store.GetIssue(ctx, issueID)
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("%s: %v", issueID, err))
+			continue
+		}
+		if issue == nil {
+			errors = append(errors, fmt.Sprintf("%s: not found", issueID))
+			continue
+		}
+
+		// Create tombstone instead of hard delete (bd-rp4o fix)
+		// This preserves deletion history and prevents resurrection during sync
+		type tombstoner interface {
+			CreateTombstone(ctx context.Context, id string, actor string, reason string) error
+		}
+		if t, ok := store.(tombstoner); ok {
+			reason := deleteArgs.Reason
+			if reason == "" {
+				reason = "deleted via daemon"
+			}
+			if err := t.CreateTombstone(ctx, issueID, "daemon", reason); err != nil {
+				errors = append(errors, fmt.Sprintf("%s: %v", issueID, err))
+				continue
+			}
+		} else {
+			// Fallback to hard delete if CreateTombstone not available
+			if err := store.DeleteIssue(ctx, issueID); err != nil {
+				errors = append(errors, fmt.Sprintf("%s: %v", issueID, err))
+				continue
+			}
+		}
+
+		// Emit mutation event for event-driven daemon
+		s.emitMutation(MutationDelete, issueID)
+		deletedCount++
+	}
+
+	// Build response
+	result := map[string]interface{}{
+		"deleted_count": deletedCount,
+		"total_count":   len(deleteArgs.IDs),
+	}
+
+	if len(errors) > 0 {
+		result["errors"] = errors
+		if deletedCount == 0 {
+			// All deletes failed
+			return Response{
+				Success: false,
+				Error:   fmt.Sprintf("failed to delete all issues: %v", errors),
+			}
+		}
+		// Partial success
+		result["partial_success"] = true
+	}
+
+	data, _ := json.Marshal(result)
 	return Response{
 		Success: true,
 		Data:    data,

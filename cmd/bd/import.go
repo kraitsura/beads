@@ -96,8 +96,9 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 		clearDuplicateExternalRefs, _ := cmd.Flags().GetBool("clear-duplicate-external-refs")
 		orphanHandling, _ := cmd.Flags().GetString("orphan-handling")
 		force, _ := cmd.Flags().GetBool("force")
+		protectLeftSnapshot, _ := cmd.Flags().GetBool("protect-left-snapshot")
 		noGitHistory, _ := cmd.Flags().GetBool("no-git-history")
-		ignoreDeletions, _ := cmd.Flags().GetBool("ignore-deletions")
+		_ = noGitHistory // Accepted for compatibility with bd sync subprocess calls
 
 		// Check if stdin is being used interactively (not piped)
 		if input == "" && term.IsTerminal(int(os.Stdin.Fd())) {
@@ -256,8 +257,23 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 			RenameOnImport:             renameOnImport,
 			ClearDuplicateExternalRefs: clearDuplicateExternalRefs,
 			OrphanHandling:             orphanHandling,
-			NoGitHistory:               noGitHistory,
-			IgnoreDeletions:            ignoreDeletions,
+		}
+
+		// If --protect-left-snapshot is set, read the left snapshot and build ID set
+		// This protects locally exported issues from git-history-backfill (bd-sync-deletion fix)
+		if protectLeftSnapshot && input != "" {
+			beadsDir := filepath.Dir(input)
+			leftSnapshotPath := filepath.Join(beadsDir, "beads.left.jsonl")
+			if _, err := os.Stat(leftSnapshotPath); err == nil {
+				sm := NewSnapshotManager(input)
+				leftIDs, err := sm.BuildIDSet(leftSnapshotPath)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to read left snapshot: %v\n", err)
+				} else if len(leftIDs) > 0 {
+					opts.ProtectLocalExportIDs = leftIDs
+					fmt.Fprintf(os.Stderr, "Protecting %d issue(s) from left snapshot\n", len(leftIDs))
+				}
+			}
 		}
 
 		result, err := importIssuesCore(ctx, dbPath, store, allIssues, opts)
@@ -405,17 +421,7 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 		if len(result.IDMapping) > 0 {
 			fmt.Fprintf(os.Stderr, ", %d issues remapped", len(result.IDMapping))
 		}
-		if result.SkippedDeleted > 0 {
-			fmt.Fprintf(os.Stderr, ", %d skipped (deleted)", result.SkippedDeleted)
-		}
 		fmt.Fprintf(os.Stderr, "\n")
-
-		// Print skipped deleted issues summary if any (bd-4zy)
-		if result.SkippedDeleted > 0 {
-			fmt.Fprintf(os.Stderr, "\n⚠️  Skipped %d issue(s) found in deletions manifest\n", result.SkippedDeleted)
-			fmt.Fprintf(os.Stderr, "   These issues were previously deleted and will not be resurrected.\n")
-			fmt.Fprintf(os.Stderr, "   Use --ignore-deletions to force import anyway.\n")
-		}
 
 		// Print skipped dependencies summary if any
 		if len(result.SkippedDependencies) > 0 {
@@ -772,8 +778,8 @@ func init() {
 	importCmd.Flags().Bool("clear-duplicate-external-refs", false, "Clear duplicate external_ref values (keeps first occurrence)")
 	importCmd.Flags().String("orphan-handling", "", "How to handle missing parent issues: strict/resurrect/skip/allow (default: use config or 'allow')")
 	importCmd.Flags().Bool("force", false, "Force metadata update even when database is already in sync with JSONL")
-	importCmd.Flags().Bool("no-git-history", false, "Skip git history backfill for deletions (use during JSONL filename migrations)")
-	importCmd.Flags().Bool("ignore-deletions", false, "Import issues even if they're in the deletions manifest")
+	importCmd.Flags().Bool("protect-left-snapshot", false, "Protect issues in left snapshot from git-history-backfill (bd-sync-deletion fix)")
+	importCmd.Flags().Bool("no-git-history", false, "Skip git history backfill for deletions (passed by bd sync)")
 	importCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output import statistics in JSON format")
 	rootCmd.AddCommand(importCmd)
 }

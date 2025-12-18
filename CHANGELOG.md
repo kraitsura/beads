@@ -7,7 +7,182 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.29.0] - 2025-12-03
+## [0.30.3] - 2025-12-17
+
+### Fixed
+
+- **Data loss race condition** (bd-b6xo) - Removed unsafe `ClearDirtyIssues()` method
+  - Old method cleared ALL dirty issues, risking data loss if export failed partway
+  - All code now uses `ClearDirtyIssuesByID()` which only clears exported issues
+  - Affects: `internal/storage/sqlite/dirty.go`, `internal/storage/memory/memory.go`
+
+### Closed (Already Implemented)
+
+- **Stale database warning** (bd-2q6d) - Commands now warn when database is out of sync with JSONL
+- **Staleness check error handling** (bd-n4td, bd-o4qy) - Proper warnings and error returns
+
+## [0.30.2] - 2025-12-16
+
+### Added
+
+- **`bd setup droid`** (GH#598) - Factory.ai (Droid) IDE support
+  - Configure beads for use with Factory.ai's Droid
+  - Contributed by @jordanhubbard
+
+- **Messaging schema fields** (bd-kwro.1) - Foundation for inter-agent messaging
+  - New `message` issue type for agent-to-agent communication
+  - New fields: `sender`, `ephemeral`, `replies_to`, `relates_to`, `duplicate_of`, `superseded_by`
+  - New dependency types: `replies-to`, `relates-to`, `duplicates`, `supersedes`
+  - Schema migration 019 (automatic on first use)
+
+- **`bd mail` commands** (bd-kwro.6) - Inter-agent messaging
+  - `bd mail send <recipient> -s <subject> -m <body>` - Send messages
+  - `bd mail inbox` - List open messages for your identity
+  - `bd mail read <id>` - Display message content
+  - `bd mail ack <id>` - Acknowledge (close) messages
+  - `bd mail reply <id> -m <body>` - Reply to messages (creates threads)
+  - Identity via `BEADS_IDENTITY` env var or `.beads/config.json`
+
+- **Graph link commands** (bd-kwro.2-5) - Knowledge graph relationships
+  - `bd relate <id1> <id2>` - Create bidirectional "see also" links
+  - `bd unrelate <id1> <id2>` - Remove relates_to links
+  - `bd duplicate <id> --of <canonical>` - Mark issue as duplicate (closes it)
+  - `bd supersede <old> --with <new>` - Mark issue as superseded (closes it)
+  - `bd show --thread` - View message threads via replies_to chain
+
+- **Hooks system** (bd-kwro.8) - Extensible event notifications
+  - `.beads/hooks/on_create` - Runs after issue creation
+  - `.beads/hooks/on_update` - Runs after issue update
+  - `.beads/hooks/on_close` - Runs after issue close
+  - `.beads/hooks/on_message` - Runs after message send
+  - Hooks receive issue ID, event type as args, full JSON on stdin
+
+- **`bd cleanup --ephemeral` flag** (bd-kwro.9) - Clean up transient messages
+  - Deletes only closed issues with `ephemeral=true`
+  - Useful for cleaning up messages after swarms complete
+
+### Fixed
+
+- **Windows build errors** (GH#585) - Fixed gosec lint warnings
+  - Contributed by @deblasis
+
+- **Issue ID prefix extraction** - Word-like suffixes (e.g., `my-project-audit`) now parse correctly
+  - Previously could incorrectly split on word boundaries
+
+### Removed
+
+- **Legacy deletions.jsonl code** (bd-fom) - Fully migrated to inline tombstones
+  - Removed `deletions.jsonl` from git tracking
+  - All deletion tracking now via inline tombstones in `issues.jsonl`
+
+### Documentation
+
+- **Messaging documentation** (bd-kwro.11) - New docs for messaging system
+  - `docs/messaging.md` - Full messaging reference with examples
+  - `docs/graph-links.md` - Graph link types and use cases
+  - Updated `AGENTS.md` with inter-agent messaging section
+
+- Windows installation command in upgrade instructions (GH#589)
+  - Contributed by @alexx-ftw
+
+- Aligned `bd prime` guidance with skill's hybrid TodoWrite approach
+
+## [0.30.1] - 2025-12-16
+
+### Added
+
+- **`bd reset` command** (GH#505) - Complete beads removal from a repository
+  - Removes `.beads/` directory and all associated data
+  - Cleans up git hooks installed by beads
+  - Use `--force` to skip confirmation prompt
+
+- **`bd cleanup --hard` flag** - Bypass tombstone TTL safety
+  - Immediately removes tombstones regardless of age
+  - Use when you need to force-clean deleted issues
+
+- **`bd update --type` flag** (GH#522) - Change issue type after creation
+  - Convert between task, bug, feature, epic types
+  - Example: `bd update bd-xyz --type epic`
+
+- **`bd q` silent quick-capture mode** (GH#540)
+  - Capture issues silently without output
+  - Ideal for scripting and automation
+
+- **`bd sync --check` flag** - Pre-sync integrity checks
+  - Validates database state before syncing
+  - Catches potential issues early
+
+- **`bd show` displays dependent issue status** (#583)
+  - Shows status for all blocked-by and blocking issues
+  - Better visibility into dependency chains
+
+- **`bd daemon --status` shows config** (#569)
+  - Displays daemon configuration in status output
+  - Contributed by @crcatala
+
+- **`bd daemon --stop-all`** - Kill all daemon processes
+  - Useful for cleanup when multiple daemons are running
+
+- **Auto-disable daemon in git worktrees** (#567)
+  - Daemon automatically disabled in worktrees for safety
+  - Prevents database conflicts between worktrees
+
+- **`claude.local.md` support** - Local-only documentation
+  - Add project notes that won't be committed
+  - Gitignored by default
+
+- **Auto-add "landing the plane" instructions to AGENTS.md**
+  - New projects get session-close protocol guidance
+
+- **Inline tombstones for soft-delete** (bd-vw8)
+  - Deleted issues become tombstones with `status: "tombstone"` in `issues.jsonl`
+  - Full audit trail: `deleted_at`, `deleted_by`, `delete_reason`, `original_type`
+  - TTL-based expiration (default 30 days) with automatic pruning via `bd compact`
+  - Proper 3-way merge support: fresh tombstones win, expired tombstones allow resurrection
+
+- **`bd migrate-tombstones` command** (bd-8f9)
+  - Converts legacy `deletions.jsonl` entries to inline tombstones
+  - Archives old file as `deletions.jsonl.migrated`
+
+- **Enhanced Git Worktree Support** (bd-737)
+  - Shared `.beads` database across all worktrees
+  - Worktree-aware database discovery
+  - Git hooks automatically adapt to worktree context
+  - Documentation in `docs/WORKTREES.md`
+
+### Fixed
+
+- **Multi-hyphen prefix parsing** (GH#405) - Prefixes like `my-cool-project` now work correctly
+- **`bd sync` on sync branch** (GH#519) - Fixed sync when already on the sync branch
+- **Pre-commit hook with removed `.beads`** (GH#483) - No longer blocks commits after beads removal
+- **Priority format error messages** (GH#517) - Clearer guidance on P0-P4 format
+- **Status naming consistency** (GH#444) - Uses `in_progress` everywhere
+- **Orphan detection with dots in directory names** (GH#508) - No more false positives
+- **Circular error in pre-push hook** (GH#532) - Fixed infinite loop scenario
+- **Doctor --fix auto-migrates tombstones** - Automatic migration during repair
+- **Daemon detects external DB replacement** (#564) - Contributed by @deblasis
+- **Import handles hierarchical hash IDs** (#584) - Contributed by @rsnodgrass
+- **Nested worktree detection** (GH#509) - Correctly finds `.beads/` in parent repo
+- **Import skips cross-prefix content matches** - Prevents incorrect renames
+- **3-way merge tolerates missing issues** - More robust conflict resolution
+- **Pre-commit warns instead of failing on flush error** - Graceful degradation
+
+### Security
+
+- **Go toolchain updated to 1.24.11** - Addresses CVEs in standard library
+
+### CI
+
+- **PR check for `.beads/issues.jsonl` changes** - Rejects accidental database commits
+
+### Dependencies
+
+- Bump `github.com/ncruces/go-sqlite3` to 0.30.3
+- Bump `github.com/spf13/cobra` to 1.10.2
+- Bump `golang.org/x/mod` to 0.31.0
+- Bump `golang.org/x/term` to 0.38.0
+- Bump `pydantic` to 2.12.5 (beads-mcp)
+- Bump `fastmcp` to 2.14.1 (beads-mcp)
 
 ## [0.29.0] - 2025-12-03
 

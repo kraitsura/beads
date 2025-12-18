@@ -29,6 +29,53 @@ class CompactModel(BaseModel):
         return super().model_dump_json(**kwargs)
 
 
+# =============================================================================
+# CONTEXT ENGINEERING: Minimal Models for List Views
+# =============================================================================
+# These lightweight models reduce context window usage by ~80% for list operations.
+# Use full Issue model only when detailed information is needed (show command).
+
+class IssueMinimal(BaseModel):
+    """Minimal issue model for list views (~80% smaller than full Issue).
+
+    Use this for ready_work, list_issues, and other bulk operations.
+    For full details including dependencies, use Issue model via show().
+    """
+    id: str
+    title: str
+    status: IssueStatus
+    priority: int = Field(ge=0, le=4)
+    issue_type: IssueType
+    assignee: str | None = None
+    labels: list[str] = Field(default_factory=list)
+    dependency_count: int = 0
+    dependent_count: int = 0
+
+    @field_validator("priority")
+    @classmethod
+    def validate_priority(cls, v: int) -> int:
+        if not 0 <= v <= 4:
+            raise ValueError("Priority must be between 0 and 4")
+        return v
+
+
+class CompactedResult(BaseModel):
+    """Result container for compacted list responses.
+
+    When results exceed threshold, returns preview + metadata instead of full data.
+    This prevents context window overflow for large issue lists.
+    """
+    compacted: bool = True
+    total_count: int
+    preview: list[IssueMinimal]
+    preview_count: int
+    hint: str = "Use show(issue_id) for full issue details"
+
+
+# =============================================================================
+# ORIGINAL MODELS (unchanged for backward compatibility)
+# =============================================================================
+
 class IssueBase(CompactModel):
     """Base issue model with shared fields."""
 

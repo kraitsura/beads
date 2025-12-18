@@ -158,15 +158,14 @@ func issueDataChanged(existing *types.Issue, updates map[string]interface{}) boo
 
 // ImportOptions configures how the import behaves
 type ImportOptions struct {
-	DryRun                     bool   // Preview changes without applying them
-	SkipUpdate                 bool   // Skip updating existing issues (create-only mode)
-	Strict                     bool   // Fail on any error (dependencies, labels, etc.)
-	RenameOnImport             bool   // Rename imported issues to match database prefix
-	SkipPrefixValidation       bool   // Skip prefix validation (for auto-import)
-	ClearDuplicateExternalRefs bool   // Clear duplicate external_ref values instead of erroring
-	OrphanHandling             string // Orphan handling mode: strict/resurrect/skip/allow (empty = use config)
-	NoGitHistory               bool   // Skip git history backfill for deletions (prevents spurious deletion during JSONL migrations)
-	IgnoreDeletions            bool   // Import issues even if they're in the deletions manifest
+	DryRun                     bool              // Preview changes without applying them
+	SkipUpdate                 bool              // Skip updating existing issues (create-only mode)
+	Strict                     bool              // Fail on any error (dependencies, labels, etc.)
+	RenameOnImport             bool              // Rename imported issues to match database prefix
+	SkipPrefixValidation       bool              // Skip prefix validation (for auto-import)
+	ClearDuplicateExternalRefs bool              // Clear duplicate external_ref values instead of erroring
+	OrphanHandling             string            // Orphan handling mode: strict/resurrect/skip/allow (empty = use config)
+	ProtectLocalExportIDs      map[string]bool   // IDs from left snapshot to protect from git-history-backfill (bd-sync-deletion fix)
 }
 
 // ImportResult contains statistics about the import operation
@@ -182,10 +181,6 @@ type ImportResult struct {
 	ExpectedPrefix      string            // Database configured prefix
 	MismatchPrefixes    map[string]int    // Map of mismatched prefixes to count
 	SkippedDependencies []string          // Dependencies skipped due to FK constraint violations
-	Purged              int               // Issues purged from DB (found in deletions manifest)
-	PurgedIDs           []string          // IDs that were purged
-	SkippedDeleted      int               // Issues skipped because they're in deletions manifest
-	SkippedDeletedIDs   []string          // IDs that were skipped due to deletions manifest
 }
 
 // importIssuesCore handles the core import logic used by both manual and auto-import.
@@ -225,8 +220,7 @@ func importIssuesCore(ctx context.Context, dbPath string, store storage.Storage,
 		SkipPrefixValidation:       opts.SkipPrefixValidation,
 		ClearDuplicateExternalRefs: opts.ClearDuplicateExternalRefs,
 		OrphanHandling:             importer.OrphanHandling(orphanHandling),
-		NoGitHistory:               opts.NoGitHistory,
-		IgnoreDeletions:            opts.IgnoreDeletions,
+		ProtectLocalExportIDs:      opts.ProtectLocalExportIDs,
 	}
 
 	// Delegate to the importer package
@@ -248,10 +242,6 @@ func importIssuesCore(ctx context.Context, dbPath string, store storage.Storage,
 		ExpectedPrefix:      result.ExpectedPrefix,
 		MismatchPrefixes:    result.MismatchPrefixes,
 		SkippedDependencies: result.SkippedDependencies,
-		Purged:              result.Purged,
-		PurgedIDs:           result.PurgedIDs,
-		SkippedDeleted:      result.SkippedDeleted,
-		SkippedDeletedIDs:   result.SkippedDeletedIDs,
 	}, nil
 }
 

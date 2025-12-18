@@ -36,6 +36,7 @@ func DatabaseVersion(path string) error {
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("failed to initialize database: %w", err)
 		}
+
 		return nil
 	}
 
@@ -50,6 +51,22 @@ func DatabaseVersion(path string) error {
 	}
 
 	return nil
+}
+
+// findJSONLPath returns the path to the JSONL file in the beads directory.
+// Returns empty string if no JSONL file exists.
+func findJSONLPath(beadsDir string) string {
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	if _, err := os.Stat(jsonlPath); err == nil {
+		return jsonlPath
+	}
+
+	beadsJSONLPath := filepath.Join(beadsDir, "beads.jsonl")
+	if _, err := os.Stat(beadsJSONLPath); err == nil {
+		return beadsJSONLPath
+	}
+
+	return ""
 }
 
 // SchemaCompatibility fixes schema compatibility issues by running bd migrate

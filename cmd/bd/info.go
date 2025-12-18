@@ -288,6 +288,60 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "0.30.3",
+		Date:    "2025-12-17",
+		Changes: []string{
+			"SECURITY: Data loss race condition fixed (bd-b6xo) - Removed unsafe ClearDirtyIssues() method",
+			"Stale database warning (bd-2q6d) - Commands now warn when DB is out of sync with JSONL",
+			"Staleness check error handling improved (bd-n4td, bd-o4qy) - Proper warnings on check failures",
+		},
+	},
+	{
+		Version: "0.30.2",
+		Date:    "2025-12-16",
+		Changes: []string{
+			"bd setup droid (GH#598) - Factory.ai (Droid) IDE support",
+			"Messaging schema fields (bd-kwro.1) - New 'message' issue type, sender/ephemeral/replies_to/relates_to/duplicate_of/superseded_by fields",
+			"New dependency types: replies-to, relates-to, duplicates, supersedes",
+			"Windows build fixes (GH#585) - gosec lint errors resolved",
+			"Issue ID prefix extraction fix - Word-like suffixes now parse correctly",
+			"Legacy deletions.jsonl code removed (bd-fom) - Fully migrated to inline tombstones",
+		},
+	},
+	{
+		Version: "0.30.1",
+		Date:    "2025-12-16",
+		Changes: []string{
+			"bd reset command (GH#505) - Complete beads removal from a repository",
+			"bd update --type flag (GH#522) - Change issue type after creation",
+			"bd q silent mode (GH#540) - Quick-capture without output for scripting",
+			"bd show displays dependent issue status (GH#583) - Shows status for blocked-by/blocking issues",
+			"claude.local.md support - Local-only documentation, gitignored by default",
+			"Auto-disable daemon in git worktrees (GH#567) - Prevents database conflicts",
+			"Inline tombstones for soft-delete (bd-vw8) - Deleted issues become tombstones in issues.jsonl",
+			"bd migrate-tombstones command (bd-8f9) - Converts legacy deletions.jsonl to inline tombstones",
+			"Enhanced Git Worktree Support (bd-737) - Shared .beads database across worktrees",
+		},
+	},
+	{
+		Version: "0.30.0",
+		Date:    "2025-12-15",
+		Changes: []string{
+			"TOMBSTONE ARCHITECTURE - Deleted issues become inline tombstones in issues.jsonl (bd-vw8)",
+			"bd migrate-tombstones - Convert legacy deletions.jsonl to inline tombstones (bd-8f9)",
+			"bd doctor tombstone health checks - Detects orphaned/expired tombstones (bd-s3v)",
+			"Git Worktree Support (bd-737) - Shared database across worktrees, worktree-aware hooks",
+			"MCP Context Engineering (GH #481) - 80-90% context reduction for MCP responses",
+			"bd thanks command (GH #555) - List contributors to your project",
+			"BD_NO_INSTALL_HOOKS env var (GH #500) - Disable automatic git hook installation",
+			"Claude Code skill marketplace (GH #468) - Install beads skill via marketplace",
+			"Daemon delete auto-sync (GH #528, #537) - Delete operations trigger auto-sync",
+			"close_reason persistence (GH #551) - Close reasons now saved to database on close",
+			"JSONL-only mode improvements (GH #549) - GetReadyWork/GetBlockedIssues for memory storage",
+			"Lock file improvements (GH #484, #555) - Fast fail on stale locks, 98% test coverage",
+		},
+	},
+	{
 		Version: "0.29.0",
 		Date:    "2025-12-03",
 		Changes: []string{

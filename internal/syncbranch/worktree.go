@@ -24,6 +24,20 @@ type CommitResult struct {
 	Message    string // Commit message used
 }
 
+// DivergenceInfo contains information about sync branch divergence from remote
+type DivergenceInfo struct {
+	LocalAhead   int    // Number of commits local is ahead of remote
+	RemoteAhead  int    // Number of commits remote is ahead of local
+	Branch       string // The sync branch name
+	Remote       string // The remote name (e.g., "origin")
+	IsDiverged   bool   // True if both local and remote have commits the other doesn't
+	IsSignificant bool  // True if divergence exceeds threshold (suggests recovery needed)
+}
+
+// SignificantDivergenceThreshold is the number of commits at which divergence is considered significant
+// When both local and remote are ahead by at least this many commits, the user should consider recovery options
+const SignificantDivergenceThreshold = 5
+
 // PullResult contains information about a worktree pull operation
 type PullResult struct {
 	Pulled        bool   // True if pull was performed
@@ -108,9 +122,9 @@ func CommitToSyncBranch(ctx context.Context, repoRoot, syncBranch, jsonlPath str
 		return nil, fmt.Errorf("failed to sync JSONL to worktree: %w", err)
 	}
 
-	// Also sync other beads files (deletions.jsonl, metadata.json)
+	// Also sync other beads files (metadata.json)
 	beadsDir := filepath.Dir(jsonlPath)
-	for _, filename := range []string{"deletions.jsonl", "metadata.json"} {
+	for _, filename := range []string{"metadata.json"} {
 		srcPath := filepath.Join(beadsDir, filename)
 		if _, err := os.Stat(srcPath); err == nil {
 			relPath, err := filepath.Rel(repoRoot, srcPath)
@@ -312,12 +326,6 @@ func PullFromSyncBranch(ctx context.Context, repoRoot, syncBranch, jsonlPath str
 		return nil, fmt.Errorf("content merge failed: %w", err)
 	}
 
-	// Also merge deletions.jsonl if it exists
-	beadsRelDir := filepath.Dir(jsonlRelPath)
-	deletionsRelPath := filepath.Join(beadsRelDir, "deletions.jsonl")
-	mergedDeletions, deletionsErr := performDeletionsMerge(ctx, worktreePath, syncBranch, remote, deletionsRelPath)
-	// deletionsErr is non-fatal - file might not exist
-
 	// Reset worktree to remote's history (adopt their commit graph)
 	resetCmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "reset", "--hard",
 		fmt.Sprintf("%s/%s", remote, syncBranch))
@@ -332,15 +340,6 @@ func PullFromSyncBranch(ctx context.Context, repoRoot, syncBranch, jsonlPath str
 	}
 	if err := os.WriteFile(worktreeJSONLPath, mergedContent, 0600); err != nil {
 		return nil, fmt.Errorf("failed to write merged JSONL: %w", err)
-	}
-
-	// Write merged deletions if we have them
-	if deletionsErr == nil && len(mergedDeletions) > 0 {
-		deletionsPath := filepath.Join(worktreePath, deletionsRelPath)
-		if err := os.WriteFile(deletionsPath, mergedDeletions, 0600); err != nil {
-			// Non-fatal - deletions are supplementary
-			_ = err
-		}
 	}
 
 	// Check if merge produced any changes from remote
@@ -455,6 +454,119 @@ func getDivergence(ctx context.Context, worktreePath, branch, remote string) (in
 	return localAhead, remoteAhead, nil
 }
 
+// CheckDivergence checks the divergence between local sync branch and remote.
+// This should be called before attempting sync operations to detect significant divergence
+// that may require user intervention.
+//
+// Parameters:
+//   - ctx: Context for cancellation
+//   - repoRoot: Path to the git repository root
+//   - syncBranch: Name of the sync branch (e.g., "beads-sync")
+//
+// Returns DivergenceInfo with details about the divergence, or error if check fails.
+func CheckDivergence(ctx context.Context, repoRoot, syncBranch string) (*DivergenceInfo, error) {
+	info := &DivergenceInfo{
+		Branch: syncBranch,
+	}
+
+	// Worktree path is under .git/beads-worktrees/<branch>
+	worktreePath := filepath.Join(repoRoot, ".git", "beads-worktrees", syncBranch)
+
+	// Initialize worktree manager
+	wtMgr := git.NewWorktreeManager(repoRoot)
+
+	// Ensure worktree exists
+	if err := wtMgr.CreateBeadsWorktree(syncBranch, worktreePath); err != nil {
+		return nil, fmt.Errorf("failed to create worktree: %w", err)
+	}
+
+	// Get remote name
+	remote := getRemoteForBranch(ctx, worktreePath, syncBranch)
+	info.Remote = remote
+
+	// Fetch from remote to get latest state
+	fetchCmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "fetch", remote, syncBranch)
+	if output, err := fetchCmd.CombinedOutput(); err != nil {
+		// Check if remote branch doesn't exist yet (first sync)
+		if strings.Contains(string(output), "couldn't find remote ref") {
+			// Remote branch doesn't exist - no divergence possible
+			return info, nil
+		}
+		return nil, fmt.Errorf("git fetch failed: %w\n%s", err, output)
+	}
+
+	// Check for divergence
+	localAhead, remoteAhead, err := getDivergence(ctx, worktreePath, syncBranch, remote)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check divergence: %w", err)
+	}
+
+	info.LocalAhead = localAhead
+	info.RemoteAhead = remoteAhead
+	info.IsDiverged = localAhead > 0 && remoteAhead > 0
+
+	// Significant divergence: both sides have many commits
+	// This suggests automatic merge may be problematic
+	if info.IsDiverged && (localAhead >= SignificantDivergenceThreshold || remoteAhead >= SignificantDivergenceThreshold) {
+		info.IsSignificant = true
+	}
+
+	return info, nil
+}
+
+// ResetToRemote resets the local sync branch to match the remote state.
+// This discards all local commits on the sync branch and adopts the remote's history.
+// Use this when the sync branch has diverged significantly and you want to discard local changes.
+//
+// Parameters:
+//   - ctx: Context for cancellation
+//   - repoRoot: Path to the git repository root
+//   - syncBranch: Name of the sync branch (e.g., "beads-sync")
+//   - jsonlPath: Path to the JSONL file in the main repo (will be updated with remote content)
+//
+// Returns error if reset fails.
+func ResetToRemote(ctx context.Context, repoRoot, syncBranch, jsonlPath string) error {
+	// Worktree path is under .git/beads-worktrees/<branch>
+	worktreePath := filepath.Join(repoRoot, ".git", "beads-worktrees", syncBranch)
+
+	// Initialize worktree manager
+	wtMgr := git.NewWorktreeManager(repoRoot)
+
+	// Ensure worktree exists
+	if err := wtMgr.CreateBeadsWorktree(syncBranch, worktreePath); err != nil {
+		return fmt.Errorf("failed to create worktree: %w", err)
+	}
+
+	// Get remote name
+	remote := getRemoteForBranch(ctx, worktreePath, syncBranch)
+
+	// Fetch from remote to get latest state
+	fetchCmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "fetch", remote, syncBranch)
+	if output, err := fetchCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git fetch failed: %w\n%s", err, output)
+	}
+
+	// Reset worktree to remote's state
+	resetCmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "reset", "--hard",
+		fmt.Sprintf("%s/%s", remote, syncBranch))
+	if output, err := resetCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git reset failed: %w\n%s", err, output)
+	}
+
+	// Convert absolute path to relative path from repo root
+	jsonlRelPath, err := filepath.Rel(repoRoot, jsonlPath)
+	if err != nil {
+		return fmt.Errorf("failed to get relative JSONL path: %w", err)
+	}
+
+	// Copy JSONL from worktree to main repo
+	if err := copyJSONLToMainRepo(worktreePath, jsonlRelPath, jsonlPath); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // performContentMerge extracts JSONL from base, local, and remote, then merges content.
 // Returns the merged JSONL content.
 func performContentMerge(ctx context.Context, worktreePath, branch, remote, jsonlRelPath string) ([]byte, error) {
@@ -552,62 +664,6 @@ func extractJSONLFromCommit(ctx context.Context, worktreePath, commit, filePath 
 	return output, nil
 }
 
-// performDeletionsMerge merges deletions.jsonl from local and remote.
-// Deletions are merged by union - we keep all deletion records from both sides.
-// This ensures that if either side deleted an issue, it stays deleted.
-func performDeletionsMerge(ctx context.Context, worktreePath, branch, remote, deletionsRelPath string) ([]byte, error) {
-	// Extract local deletions
-	localDeletions, localErr := extractJSONLFromCommit(ctx, worktreePath, "HEAD", deletionsRelPath)
-
-	// Extract remote deletions
-	remoteRef := fmt.Sprintf("%s/%s", remote, branch)
-	remoteDeletions, remoteErr := extractJSONLFromCommit(ctx, worktreePath, remoteRef, deletionsRelPath)
-
-	// If neither exists, nothing to merge
-	if localErr != nil && remoteErr != nil {
-		return nil, fmt.Errorf("no deletions files to merge")
-	}
-
-	// If only one exists, use that
-	if localErr != nil {
-		return remoteDeletions, nil
-	}
-	if remoteErr != nil {
-		return localDeletions, nil
-	}
-
-	// Both exist - merge by taking union of lines (deduplicated)
-	// Each line in deletions.jsonl is a JSON object with an "id" field
-	seen := make(map[string]bool)
-	var merged []byte
-
-	// Process local deletions
-	for _, line := range strings.Split(string(localDeletions), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		if !seen[line] {
-			seen[line] = true
-			merged = append(merged, []byte(line+"\n")...)
-		}
-	}
-
-	// Process remote deletions
-	for _, line := range strings.Split(string(remoteDeletions), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		if !seen[line] {
-			seen[line] = true
-			merged = append(merged, []byte(line+"\n")...)
-		}
-	}
-
-	return merged, nil
-}
-
 // copyJSONLToMainRepo copies JSONL and related files from worktree to main repo.
 func copyJSONLToMainRepo(worktreePath, jsonlRelPath, jsonlPath string) error {
 	worktreeJSONLPath := filepath.Join(worktreePath, jsonlRelPath)
@@ -628,10 +684,10 @@ func copyJSONLToMainRepo(worktreePath, jsonlRelPath, jsonlPath string) error {
 		return fmt.Errorf("failed to write main JSONL: %w", err)
 	}
 
-	// Also sync other beads files back (deletions.jsonl, metadata.json)
+	// Also sync other beads files back (metadata.json)
 	beadsDir := filepath.Dir(jsonlPath)
 	worktreeBeadsDir := filepath.Dir(worktreeJSONLPath)
-	for _, filename := range []string{"deletions.jsonl", "metadata.json"} {
+	for _, filename := range []string{"metadata.json"} {
 		worktreeSrcPath := filepath.Join(worktreeBeadsDir, filename)
 		if fileData, err := os.ReadFile(worktreeSrcPath); err == nil {
 			dstPath := filepath.Join(beadsDir, filename)
@@ -690,18 +746,93 @@ func commitInWorktree(ctx context.Context, worktreePath, jsonlRelPath, message s
 	return nil
 }
 
-// pushFromWorktree pushes the sync branch from the worktree
-func pushFromWorktree(ctx context.Context, worktreePath, branch string) error {
-	remote := getRemoteForBranch(ctx, worktreePath, branch)
+// isNonFastForwardError checks if git push output indicates a non-fast-forward rejection
+func isNonFastForwardError(output string) bool {
+	// Git outputs these messages for non-fast-forward rejections
+	return strings.Contains(output, "non-fast-forward") ||
+		strings.Contains(output, "fetch first") ||
+		strings.Contains(output, "rejected") && strings.Contains(output, "behind")
+}
 
-	// Push with explicit remote and branch, set upstream if not set
-	cmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "push", "--set-upstream", remote, branch)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("git push failed from worktree: %w\n%s", err, output)
+// fetchAndRebaseInWorktree fetches remote and rebases local commits on top
+func fetchAndRebaseInWorktree(ctx context.Context, worktreePath, branch, remote string) error {
+	// Fetch latest from remote
+	fetchCmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "fetch", remote, branch)
+	if output, err := fetchCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("fetch failed: %w\n%s", err, output)
+	}
+
+	// Rebase local commits on top of remote
+	rebaseCmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "rebase", fmt.Sprintf("%s/%s", remote, branch))
+	if output, err := rebaseCmd.CombinedOutput(); err != nil {
+		// Abort the failed rebase to leave worktree in clean state
+		abortCmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "rebase", "--abort")
+		_ = abortCmd.Run() // Best effort
+		return fmt.Errorf("rebase failed: %w\n%s", err, output)
 	}
 
 	return nil
+}
+
+// pushFromWorktree pushes the sync branch from the worktree with retry logic
+// for handling concurrent push conflicts (non-fast-forward errors).
+func pushFromWorktree(ctx context.Context, worktreePath, branch string) error {
+	remote := getRemoteForBranch(ctx, worktreePath, branch)
+	maxRetries := 5
+
+	var lastErr error
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		// Push with explicit remote and branch, set upstream if not set
+		cmd := exec.CommandContext(ctx, "git", "-C", worktreePath, "push", "--set-upstream", remote, branch)
+		// Set BD_SYNC_IN_PROGRESS so pre-push hook knows to skip checks (GH#532)
+		// This prevents circular error where hook suggests running bd sync
+		cmd.Env = append(os.Environ(), "BD_SYNC_IN_PROGRESS=1")
+		output, err := cmd.CombinedOutput()
+
+		if err == nil {
+			return nil // Success
+		}
+
+		outputStr := string(output)
+		lastErr = fmt.Errorf("git push failed from worktree: %w\n%s", err, outputStr)
+
+		// Check if this is a non-fast-forward error (concurrent push conflict)
+		if isNonFastForwardError(outputStr) {
+			// Attempt fetch + rebase to get ahead of remote
+			if rebaseErr := fetchAndRebaseInWorktree(ctx, worktreePath, branch, remote); rebaseErr != nil {
+				// Rebase failed - provide clear recovery options (bd-vckm)
+				return fmt.Errorf(`sync branch diverged and automatic recovery failed
+
+The sync branch '%s' has diverged from remote '%s/%s' and automatic rebase failed.
+
+Recovery options:
+  1. Reset to remote state (discard local sync changes):
+     bd sync --reset-remote
+
+  2. Force push local state to remote (overwrites remote):
+     bd sync --force-push
+
+  3. Manual recovery in the sync branch worktree:
+     cd .git/beads-worktrees/%s
+     git status
+     # Resolve conflicts manually, then:
+     bd sync
+
+Original error: %v
+Rebase error: %v`, branch, remote, branch, branch, lastErr, rebaseErr)
+			}
+			// Rebase succeeded - retry push immediately (no backoff needed)
+			continue
+		}
+
+		// For other errors, use exponential backoff before retry
+		if attempt < maxRetries-1 {
+			waitTime := time.Duration(100<<uint(attempt)) * time.Millisecond // 100ms, 200ms, 400ms, 800ms
+			time.Sleep(waitTime)
+		}
+	}
+
+	return fmt.Errorf("push failed after %d attempts: %w", maxRetries, lastErr)
 }
 
 // PushSyncBranch pushes the sync branch to remote. (bd-4u8)
@@ -738,11 +869,41 @@ func getRemoteForBranch(ctx context.Context, worktreePath, branch string) string
 }
 
 // GetRepoRoot returns the git repository root directory
+// For worktrees, this returns the main repository root (not the worktree root)
 func GetRepoRoot(ctx context.Context) (string, error) {
+	// Check if .git is a file (worktree) or directory (regular repo)
+	gitPath := ".git"
+	if info, err := os.Stat(gitPath); err == nil {
+		if info.Mode().IsRegular() {
+			// Worktree: read .git file
+			content, err := os.ReadFile(gitPath)
+			if err != nil {
+				return "", fmt.Errorf("failed to read .git file: %w", err)
+			}
+			line := strings.TrimSpace(string(content))
+			if strings.HasPrefix(line, "gitdir: ") {
+				gitDir := strings.TrimPrefix(line, "gitdir: ")
+				// Remove /worktrees/* part
+				if idx := strings.Index(gitDir, "/worktrees/"); idx > 0 {
+					gitDir = gitDir[:idx]
+				}
+				return filepath.Dir(gitDir), nil
+			}
+		} else if info.IsDir() {
+			// Regular repo: .git is a directory
+			absGitPath, err := filepath.Abs(gitPath)
+			if err != nil {
+				return "", err
+			}
+			return filepath.Dir(absGitPath), nil
+		}
+	}
+
+	// Fallback to git command
 	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--show-toplevel")
 	output, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("failed to get git root: %w", err)
+		return "", fmt.Errorf("not a git repository: %w", err)
 	}
 	return strings.TrimSpace(string(output)), nil
 }
@@ -831,4 +992,26 @@ func HasGitRemote(ctx context.Context) bool {
 		return false
 	}
 	return len(strings.TrimSpace(string(output))) > 0
+}
+
+// GetCurrentBranch returns the name of the current git branch
+func GetCurrentBranch(ctx context.Context) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", "symbolic-ref", "--short", "HEAD")
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to get current branch: %w", err)
+	}
+	return strings.TrimSpace(string(output)), nil
+}
+
+// IsSyncBranchSameAsCurrent returns true if the sync branch is the same as the current branch.
+// This is used to detect the case where we can't use a worktree because the branch is already
+// checked out. In this case, we should commit directly to the current branch instead.
+// See: https://github.com/steveyegge/beads/issues/519
+func IsSyncBranchSameAsCurrent(ctx context.Context, syncBranch string) bool {
+	currentBranch, err := GetCurrentBranch(ctx)
+	if err != nil {
+		return false
+	}
+	return currentBranch == syncBranch
 }
