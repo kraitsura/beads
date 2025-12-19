@@ -101,8 +101,7 @@ func (s *SQLiteStorage) GetReadyWork(ctx context.Context, filter types.WorkFilte
 		i.status, i.priority, i.issue_type, i.assignee, i.estimated_minutes,
 		i.created_at, i.updated_at, i.closed_at, i.external_ref, i.source_repo, i.close_reason,
 		i.deleted_at, i.deleted_by, i.delete_reason, i.original_type,
-		i.review_status, i.reviewed_by, i.reviewed_at,
-		i.sender, i.ephemeral, i.replies_to, i.relates_to, i.duplicate_of, i.superseded_by
+		i.sender, i.ephemeral, i.pinned
 		FROM issues i
 		WHERE %s
 		AND NOT EXISTS (
@@ -131,8 +130,7 @@ func (s *SQLiteStorage) GetStaleIssues(ctx context.Context, filter types.StaleFi
 			created_at, updated_at, closed_at, external_ref, source_repo,
 			compaction_level, compacted_at, compacted_at_commit, original_size, close_reason,
 			deleted_at, deleted_by, delete_reason, original_type,
-			review_status, reviewed_by, reviewed_at,
-			sender, ephemeral, replies_to, relates_to, duplicate_of, superseded_by
+			sender, ephemeral, pinned
 		FROM issues
 		WHERE status != 'closed'
 		  AND datetime(updated_at) < datetime('now', '-' || ? || ' days')
@@ -178,17 +176,11 @@ func (s *SQLiteStorage) GetStaleIssues(ctx context.Context, filter types.StaleFi
 		var deletedBy sql.NullString
 		var deleteReason sql.NullString
 		var originalType sql.NullString
-		// Review fields
-		var reviewStatus sql.NullString
-		var reviewedBy sql.NullString
-		var reviewedAt sql.NullTime
 		// Messaging fields (bd-kwro)
 		var sender sql.NullString
 		var ephemeral sql.NullInt64
-		var repliesTo sql.NullString
-		var relatesTo sql.NullString
-		var duplicateOf sql.NullString
-		var supersededBy sql.NullString
+		// Pinned field (bd-7h5)
+		var pinned sql.NullInt64
 
 		err := rows.Scan(
 			&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Design,
@@ -197,8 +189,7 @@ func (s *SQLiteStorage) GetStaleIssues(ctx context.Context, filter types.StaleFi
 			&issue.CreatedAt, &issue.UpdatedAt, &closedAt, &externalRef, &sourceRepo,
 			&compactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &closeReason,
 			&deletedAt, &deletedBy, &deleteReason, &originalType,
-			&reviewStatus, &reviewedBy, &reviewedAt,
-			&sender, &ephemeral, &repliesTo, &relatesTo, &duplicateOf, &supersededBy,
+			&sender, &ephemeral, &pinned,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan stale issue: %w", err)
@@ -248,16 +239,6 @@ func (s *SQLiteStorage) GetStaleIssues(ctx context.Context, filter types.StaleFi
 		if originalType.Valid {
 			issue.OriginalType = originalType.String
 		}
-		// Review fields
-		if reviewStatus.Valid {
-			issue.ReviewStatus = types.ReviewStatus(reviewStatus.String)
-		}
-		if reviewedBy.Valid {
-			issue.ReviewedBy = reviewedBy.String
-		}
-		if reviewedAt.Valid {
-			issue.ReviewedAt = &reviewedAt.Time
-		}
 		// Messaging fields (bd-kwro)
 		if sender.Valid {
 			issue.Sender = sender.String
@@ -265,17 +246,9 @@ func (s *SQLiteStorage) GetStaleIssues(ctx context.Context, filter types.StaleFi
 		if ephemeral.Valid && ephemeral.Int64 != 0 {
 			issue.Ephemeral = true
 		}
-		if repliesTo.Valid {
-			issue.RepliesTo = repliesTo.String
-		}
-		if relatesTo.Valid && relatesTo.String != "" {
-			issue.RelatesTo = parseJSONStringArray(relatesTo.String)
-		}
-		if duplicateOf.Valid {
-			issue.DuplicateOf = duplicateOf.String
-		}
-		if supersededBy.Valid {
-			issue.SupersededBy = supersededBy.String
+		// Pinned field (bd-7h5)
+		if pinned.Valid && pinned.Int64 != 0 {
+			issue.Pinned = true
 		}
 
 		issues = append(issues, &issue)

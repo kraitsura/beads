@@ -306,8 +306,7 @@ func (t *sqliteTxStorage) GetIssue(ctx context.Context, id string) (*types.Issue
 		       created_at, updated_at, closed_at, external_ref,
 		       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason,
 		       deleted_at, deleted_by, delete_reason, original_type,
-		       review_status, reviewed_by, reviewed_at,
-		       sender, ephemeral, replies_to, relates_to, duplicate_of, superseded_by
+		       sender, ephemeral, pinned
 		FROM issues
 		WHERE id = ?
 	`, id)
@@ -598,7 +597,7 @@ func (t *sqliteTxStorage) DeleteIssue(ctx context.Context, id string) error {
 func (t *sqliteTxStorage) AddDependency(ctx context.Context, dep *types.Dependency, actor string) error {
 	// Validate dependency type
 	if !dep.Type.IsValid() {
-		return fmt.Errorf("invalid dependency type: %s (must be blocks, related, parent-child, or discovered-from)", dep.Type)
+		return fmt.Errorf("invalid dependency type: %q (must be non-empty string, max 50 chars)", dep.Type)
 	}
 
 	// Validate that both issues exist
@@ -638,9 +637,11 @@ func (t *sqliteTxStorage) AddDependency(ctx context.Context, dep *types.Dependen
 		dep.CreatedBy = actor
 	}
 
-	// Cycle detection
-	var cycleExists bool
-	err = t.conn.QueryRowContext(ctx, `
+	// Cycle detection - skip for relates-to (inherently bidirectional)
+	// See dependencies.go for full rationale on cycle prevention
+	if dep.Type != types.DepRelatesTo {
+		var cycleExists bool
+		err = t.conn.QueryRowContext(ctx, `
 		WITH RECURSIVE paths AS (
 			SELECT
 				issue_id,
@@ -665,20 +666,21 @@ func (t *sqliteTxStorage) AddDependency(ctx context.Context, dep *types.Dependen
 		)
 	`, dep.DependsOnID, dep.IssueID).Scan(&cycleExists)
 
-	if err != nil {
-		return fmt.Errorf("failed to check for cycles: %w", err)
+		if err != nil {
+			return fmt.Errorf("failed to check for cycles: %w", err)
+		}
+
+		if cycleExists {
+			return fmt.Errorf("cannot add dependency: would create a cycle (%s → %s → ... → %s)",
+				dep.IssueID, dep.DependsOnID, dep.IssueID)
+		}
 	}
 
-	if cycleExists {
-		return fmt.Errorf("cannot add dependency: would create a cycle (%s → %s → ... → %s)",
-			dep.IssueID, dep.DependsOnID, dep.IssueID)
-	}
-
-	// Insert dependency
+	// Insert dependency (including metadata and thread_id for edge consolidation - Decision 004)
 	_, err = t.conn.ExecContext(ctx, `
-		INSERT INTO dependencies (issue_id, depends_on_id, type, created_at, created_by)
-		VALUES (?, ?, ?, ?, ?)
-	`, dep.IssueID, dep.DependsOnID, dep.Type, dep.CreatedAt, dep.CreatedBy)
+		INSERT INTO dependencies (issue_id, depends_on_id, type, created_at, created_by, metadata, thread_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, dep.IssueID, dep.DependsOnID, dep.Type, dep.CreatedAt, dep.CreatedBy, dep.Metadata, dep.ThreadID)
 	if err != nil {
 		return fmt.Errorf("failed to add dependency: %w", err)
 	}
@@ -1078,6 +1080,15 @@ func (t *sqliteTxStorage) SearchIssues(ctx context.Context, query string, filter
 		}
 	}
 
+	// Pinned filtering (bd-7h5)
+	if filter.Pinned != nil {
+		if *filter.Pinned {
+			whereClauses = append(whereClauses, "pinned = 1")
+		} else {
+			whereClauses = append(whereClauses, "(pinned = 0 OR pinned IS NULL)")
+		}
+	}
+
 	whereSQL := ""
 	if len(whereClauses) > 0 {
 		whereSQL = "WHERE " + strings.Join(whereClauses, " AND ")
@@ -1096,8 +1107,7 @@ func (t *sqliteTxStorage) SearchIssues(ctx context.Context, query string, filter
 		       created_at, updated_at, closed_at, external_ref,
 		       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason,
 		       deleted_at, deleted_by, delete_reason, original_type,
-		       review_status, reviewed_by, reviewed_at,
-		       sender, ephemeral, replies_to, relates_to, duplicate_of, superseded_by
+		       sender, ephemeral, pinned
 		FROM issues
 		%s
 		ORDER BY priority ASC, created_at DESC
@@ -1137,17 +1147,11 @@ func scanIssueRow(row scanner) (*types.Issue, error) {
 	var deletedBy sql.NullString
 	var deleteReason sql.NullString
 	var originalType sql.NullString
-	// Review fields
-	var reviewStatus sql.NullString
-	var reviewedBy sql.NullString
-	var reviewedAt sql.NullTime
 	// Messaging fields (bd-kwro)
 	var sender sql.NullString
 	var ephemeral sql.NullInt64
-	var repliesTo sql.NullString
-	var relatesTo sql.NullString
-	var duplicateOf sql.NullString
-	var supersededBy sql.NullString
+	// Pinned field (bd-7h5)
+	var pinned sql.NullInt64
 
 	err := row.Scan(
 		&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Design,
@@ -1156,8 +1160,7 @@ func scanIssueRow(row scanner) (*types.Issue, error) {
 		&issue.CreatedAt, &issue.UpdatedAt, &closedAt, &externalRef,
 		&issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo, &closeReason,
 		&deletedAt, &deletedBy, &deleteReason, &originalType,
-		&reviewStatus, &reviewedBy, &reviewedAt,
-		&sender, &ephemeral, &repliesTo, &relatesTo, &duplicateOf, &supersededBy,
+		&sender, &ephemeral, &pinned,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to scan issue: %w", err)
@@ -1204,16 +1207,6 @@ func scanIssueRow(row scanner) (*types.Issue, error) {
 	if originalType.Valid {
 		issue.OriginalType = originalType.String
 	}
-	// Review fields
-	if reviewStatus.Valid {
-		issue.ReviewStatus = types.ReviewStatus(reviewStatus.String)
-	}
-	if reviewedBy.Valid {
-		issue.ReviewedBy = reviewedBy.String
-	}
-	if reviewedAt.Valid {
-		issue.ReviewedAt = &reviewedAt.Time
-	}
 	// Messaging fields (bd-kwro)
 	if sender.Valid {
 		issue.Sender = sender.String
@@ -1221,17 +1214,9 @@ func scanIssueRow(row scanner) (*types.Issue, error) {
 	if ephemeral.Valid && ephemeral.Int64 != 0 {
 		issue.Ephemeral = true
 	}
-	if repliesTo.Valid {
-		issue.RepliesTo = repliesTo.String
-	}
-	if relatesTo.Valid && relatesTo.String != "" {
-		issue.RelatesTo = parseJSONStringArray(relatesTo.String)
-	}
-	if duplicateOf.Valid {
-		issue.DuplicateOf = duplicateOf.String
-	}
-	if supersededBy.Valid {
-		issue.SupersededBy = supersededBy.String
+	// Pinned field (bd-7h5)
+	if pinned.Valid && pinned.Int64 != 0 {
+		issue.Pinned = true
 	}
 
 	return &issue, nil

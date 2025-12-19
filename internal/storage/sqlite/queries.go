@@ -11,6 +11,11 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
+// NOTE: createGraphEdgesFromIssueFields and createGraphEdgesFromUpdates removed
+// per Decision 004 Phase 4 - Edge Schema Consolidation.
+// Graph edges (replies-to, relates-to, duplicates, supersedes) are now managed
+// exclusively through the dependency API. Use AddDependency() instead.
+
 // parseNullableTimeString parses a nullable time string from database TEXT columns.
 // The ncruces/go-sqlite3 driver only auto-converts TEXT→time.Time for columns declared
 // as DATETIME/DATE/TIME/TIMESTAMP. For TEXT columns (like deleted_at), we must parse manually.
@@ -198,6 +203,9 @@ func (s *SQLiteStorage) CreateIssue(ctx context.Context, issue *types.Issue, act
 		return wrapDBError("record creation event", err)
 	}
 
+	// NOTE: Graph edges (replies-to, relates-to, duplicates, supersedes) are now
+	// managed via AddDependency() per Decision 004 Phase 4.
+
 	// Mark issue as dirty for incremental export
 	if err := markDirty(ctx, conn, issue.ID); err != nil {
 		return wrapDBError("mark issue dirty", err)
@@ -219,6 +227,11 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 	// Check for external database file modifications (daemon mode)
 	s.checkFreshness()
 
+	// Hold read lock during database operations to prevent reconnect() from
+	// closing the connection mid-query (GH#607 race condition fix)
+	s.reconnectMu.RLock()
+	defer s.reconnectMu.RUnlock()
+
 	var issue types.Issue
 	var closedAt sql.NullTime
 	var estimatedMinutes sql.NullInt64
@@ -232,17 +245,11 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 	var deletedBy sql.NullString
 	var deleteReason sql.NullString
 	var originalType sql.NullString
-	// Review fields
-	var reviewStatus sql.NullString
-	var reviewedBy sql.NullString
-	var reviewedAt sql.NullTime
 	// Messaging fields (bd-kwro)
 	var sender sql.NullString
 	var ephemeral sql.NullInt64
-	var repliesTo sql.NullString
-	var relatesTo sql.NullString
-	var duplicateOf sql.NullString
-	var supersededBy sql.NullString
+	// Pinned field (bd-7h5)
+	var pinned sql.NullInt64
 
 	var contentHash sql.NullString
 	var compactedAtCommit sql.NullString
@@ -252,8 +259,7 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 		       created_at, updated_at, closed_at, external_ref,
 		       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason,
 		       deleted_at, deleted_by, delete_reason, original_type,
-		       review_status, reviewed_by, reviewed_at,
-		       sender, ephemeral, replies_to, relates_to, duplicate_of, superseded_by
+		       sender, ephemeral, pinned
 		FROM issues
 		WHERE id = ?
 	`, id).Scan(
@@ -263,8 +269,7 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 		&issue.CreatedAt, &issue.UpdatedAt, &closedAt, &externalRef,
 		&issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo, &closeReason,
 		&deletedAt, &deletedBy, &deleteReason, &originalType,
-		&reviewStatus, &reviewedBy, &reviewedAt,
-		&sender, &ephemeral, &repliesTo, &relatesTo, &duplicateOf, &supersededBy,
+		&sender, &ephemeral, &pinned,
 	)
 
 	if err == sql.ErrNoRows {
@@ -315,16 +320,6 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 	if originalType.Valid {
 		issue.OriginalType = originalType.String
 	}
-	// Review fields
-	if reviewStatus.Valid {
-		issue.ReviewStatus = types.ReviewStatus(reviewStatus.String)
-	}
-	if reviewedBy.Valid {
-		issue.ReviewedBy = reviewedBy.String
-	}
-	if reviewedAt.Valid {
-		issue.ReviewedAt = &reviewedAt.Time
-	}
 	// Messaging fields (bd-kwro)
 	if sender.Valid {
 		issue.Sender = sender.String
@@ -332,17 +327,9 @@ func (s *SQLiteStorage) GetIssue(ctx context.Context, id string) (*types.Issue, 
 	if ephemeral.Valid && ephemeral.Int64 != 0 {
 		issue.Ephemeral = true
 	}
-	if repliesTo.Valid {
-		issue.RepliesTo = repliesTo.String
-	}
-	if relatesTo.Valid && relatesTo.String != "" {
-		issue.RelatesTo = parseJSONStringArray(relatesTo.String)
-	}
-	if duplicateOf.Valid {
-		issue.DuplicateOf = duplicateOf.String
-	}
-	if supersededBy.Valid {
-		issue.SupersededBy = supersededBy.String
+	// Pinned field (bd-7h5)
+	if pinned.Valid && pinned.Int64 != 0 {
+		issue.Pinned = true
 	}
 
 	// Fetch labels for this issue
@@ -447,17 +434,11 @@ func (s *SQLiteStorage) GetIssueByExternalRef(ctx context.Context, externalRef s
 	var deletedBy sql.NullString
 	var deleteReason sql.NullString
 	var originalType sql.NullString
-	// Review fields
-	var reviewStatus sql.NullString
-	var reviewedBy sql.NullString
-	var reviewedAt sql.NullTime
 	// Messaging fields (bd-kwro)
 	var sender sql.NullString
 	var ephemeral sql.NullInt64
-	var repliesTo sql.NullString
-	var relatesTo sql.NullString
-	var duplicateOf sql.NullString
-	var supersededBy sql.NullString
+	// Pinned field (bd-7h5)
+	var pinned sql.NullInt64
 
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, content_hash, title, description, design, acceptance_criteria, notes,
@@ -465,8 +446,7 @@ func (s *SQLiteStorage) GetIssueByExternalRef(ctx context.Context, externalRef s
 		       created_at, updated_at, closed_at, external_ref,
 		       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason,
 		       deleted_at, deleted_by, delete_reason, original_type,
-		       review_status, reviewed_by, reviewed_at,
-		       sender, ephemeral, replies_to, relates_to, duplicate_of, superseded_by
+		       sender, ephemeral, pinned
 		FROM issues
 		WHERE external_ref = ?
 	`, externalRef).Scan(
@@ -476,8 +456,7 @@ func (s *SQLiteStorage) GetIssueByExternalRef(ctx context.Context, externalRef s
 		&issue.CreatedAt, &issue.UpdatedAt, &closedAt, &externalRefCol,
 		&issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo, &closeReason,
 		&deletedAt, &deletedBy, &deleteReason, &originalType,
-		&reviewStatus, &reviewedBy, &reviewedAt,
-		&sender, &ephemeral, &repliesTo, &relatesTo, &duplicateOf, &supersededBy,
+		&sender, &ephemeral, &pinned,
 	)
 
 	if err == sql.ErrNoRows {
@@ -528,16 +507,6 @@ func (s *SQLiteStorage) GetIssueByExternalRef(ctx context.Context, externalRef s
 	if originalType.Valid {
 		issue.OriginalType = originalType.String
 	}
-	// Review fields
-	if reviewStatus.Valid {
-		issue.ReviewStatus = types.ReviewStatus(reviewStatus.String)
-	}
-	if reviewedBy.Valid {
-		issue.ReviewedBy = reviewedBy.String
-	}
-	if reviewedAt.Valid {
-		issue.ReviewedAt = &reviewedAt.Time
-	}
 	// Messaging fields (bd-kwro)
 	if sender.Valid {
 		issue.Sender = sender.String
@@ -545,17 +514,9 @@ func (s *SQLiteStorage) GetIssueByExternalRef(ctx context.Context, externalRef s
 	if ephemeral.Valid && ephemeral.Int64 != 0 {
 		issue.Ephemeral = true
 	}
-	if repliesTo.Valid {
-		issue.RepliesTo = repliesTo.String
-	}
-	if relatesTo.Valid && relatesTo.String != "" {
-		issue.RelatesTo = parseJSONStringArray(relatesTo.String)
-	}
-	if duplicateOf.Valid {
-		issue.DuplicateOf = duplicateOf.String
-	}
-	if supersededBy.Valid {
-		issue.SupersededBy = supersededBy.String
+	// Pinned field (bd-7h5)
+	if pinned.Valid && pinned.Int64 != 0 {
+		issue.Pinned = true
 	}
 
 	// Fetch labels for this issue
@@ -582,17 +543,11 @@ var allowedUpdateFields = map[string]bool{
 	"estimated_minutes":   true,
 	"external_ref":        true,
 	"closed_at":           true,
-	// Review fields
-	"review_status":       true,
-	"reviewed_by":         true,
-	"reviewed_at":         true,
 	// Messaging fields (bd-kwro)
-	"sender":        true,
-	"ephemeral":     true,
-	"replies_to":    true,
-	"relates_to":    true,
-	"duplicate_of":  true,
-	"superseded_by": true,
+	"sender":    true,
+	"ephemeral": true,
+	// NOTE: replies_to, relates_to, duplicate_of, superseded_by removed per Decision 004
+	// Use AddDependency() to create graph edges instead
 }
 
 // validatePriority validates a priority value
@@ -809,6 +764,8 @@ func (s *SQLiteStorage) UpdateIssue(ctx context.Context, id string, updates map[
 	if err != nil {
 		return fmt.Errorf("failed to record event: %w", err)
 	}
+
+	// NOTE: Graph edges now managed via AddDependency() per Decision 004 Phase 4.
 
 	// Mark issue as dirty for incremental export
 	_, err = tx.ExecContext(ctx, `
@@ -1460,6 +1417,11 @@ func (s *SQLiteStorage) SearchIssues(ctx context.Context, query string, filter t
 	// Check for external database file modifications (daemon mode)
 	s.checkFreshness()
 
+	// Hold read lock during database operations to prevent reconnect() from
+	// closing the connection mid-query (GH#607 race condition fix)
+	s.reconnectMu.RLock()
+	defer s.reconnectMu.RUnlock()
+
 	whereClauses := []string{}
 	args := []interface{}{}
 
@@ -1597,6 +1559,15 @@ func (s *SQLiteStorage) SearchIssues(ctx context.Context, query string, filter t
 		}
 	}
 
+	// Pinned filtering (bd-7h5)
+	if filter.Pinned != nil {
+		if *filter.Pinned {
+			whereClauses = append(whereClauses, "pinned = 1")
+		} else {
+			whereClauses = append(whereClauses, "(pinned = 0 OR pinned IS NULL)")
+		}
+	}
+
 	whereSQL := ""
 	if len(whereClauses) > 0 {
 		whereSQL = "WHERE " + strings.Join(whereClauses, " AND ")
@@ -1614,8 +1585,7 @@ func (s *SQLiteStorage) SearchIssues(ctx context.Context, query string, filter t
 		       status, priority, issue_type, assignee, estimated_minutes,
 		       created_at, updated_at, closed_at, external_ref, source_repo, close_reason,
 		       deleted_at, deleted_by, delete_reason, original_type,
-		       review_status, reviewed_by, reviewed_at,
-		       sender, ephemeral, replies_to, relates_to, duplicate_of, superseded_by
+		       sender, ephemeral, pinned
 		FROM issues
 		%s
 		ORDER BY priority ASC, created_at DESC
