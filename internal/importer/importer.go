@@ -505,6 +505,7 @@ func upsertIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues
 	// Track what we need to create
 	var newIssues []*types.Issue
 	seenHashes := make(map[string]bool)
+	seenIDs := make(map[string]bool) // Track IDs to prevent UNIQUE constraint errors
 
 	for _, incoming := range issues {
 		hash := incoming.ContentHash
@@ -514,12 +515,20 @@ func upsertIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues
 			incoming.ContentHash = hash
 		}
 
-		// Skip duplicates within incoming batch
+		// Skip duplicates within incoming batch (by content hash)
 		if seenHashes[hash] {
 			result.Skipped++
 			continue
 		}
 		seenHashes[hash] = true
+
+		// Skip duplicates by ID to prevent UNIQUE constraint violations
+		// This handles JSONL files with multiple versions of the same issue
+		if seenIDs[incoming.ID] {
+			result.Skipped++
+			continue
+		}
+		seenIDs[incoming.ID] = true
 
 		// CRITICAL: Check for tombstone FIRST, before any other matching (bd-4q8 fix)
 		// This prevents ghost resurrection regardless of which phase would normally match.

@@ -288,6 +288,35 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "0.30.6",
+		Date:    "2025-12-18",
+		Changes: []string{
+			"bd graph command shows dependency counts using subgraph formatting (bd-6v2)",
+			"types.StatusPinned for persistent beads that survive cleanup",
+			"CRITICAL: Fixed dependency resurrection bug in 3-way merge (bd-ndye) - removals now win",
+		},
+	},
+	{
+		Version: "0.30.5",
+		Date:    "2025-12-18",
+		Changes: []string{
+			"REMOVED: YAML simple template system - --from-template flag removed from bd create",
+			"REMOVED: Embedded templates (bug.yaml, epic.yaml, feature.yaml) - Use Beads templates instead",
+			"Templates are now purely Beads-based - Create epic with 'template' label, use bd template instantiate",
+		},
+	},
+	{
+		Version: "0.30.4",
+		Date:    "2025-12-18",
+		Changes: []string{
+			"bd template instantiate (bd-r6a.2) - Create beads issues from Beads templates",
+			"--assignee flag for template instantiate - Auto-assign during instantiation",
+			"bd mail inbox --identity fix - Now properly filters by identity parameter",
+			"Orphan detection fixes - No longer warns about closed issues or tombstones",
+			"EXPERIMENTAL: Graph link fields (relates_to, replies_to, duplicate_of, superseded_by) and mail commands are subject to breaking changes",
+		},
+	},
+	{
 		Version: "0.30.3",
 		Date:    "2025-12-17",
 		Changes: []string{

@@ -130,6 +130,7 @@ func init() {
 	// Inbox command flags
 	mailInboxCmd.Flags().StringVar(&mailFrom, "from", "", "Filter by sender")
 	mailInboxCmd.Flags().IntVar(&mailPriorityFlag, "priority", -1, "Filter by priority (0-4)")
+	mailInboxCmd.Flags().StringVar(&mailIdentity, "identity", "", "Override recipient identity")
 
 	// Read command flags
 	mailReadCmd.Flags().StringVar(&mailIdentity, "identity", "", "Override identity for access check")
@@ -361,9 +362,7 @@ func runMailInbox(cmd *cobra.Command, args []string) error {
 
 		fmt.Printf("  %s: %s%s\n", msg.ID, msg.Title, priorityStr)
 		fmt.Printf("      From: %s (%s)\n", msg.Sender, timeStr)
-		if msg.RepliesTo != "" {
-			fmt.Printf("      Re: %s\n", msg.RepliesTo)
-		}
+		// NOTE: Thread info now in dependencies (Decision 004)
 		fmt.Println()
 	}
 
@@ -417,9 +416,7 @@ func runMailRead(cmd *cobra.Command, args []string) error {
 	if issue.Priority <= 1 {
 		fmt.Printf("Priority: P%d\n", issue.Priority)
 	}
-	if issue.RepliesTo != "" {
-		fmt.Printf("Re:      %s\n", issue.RepliesTo)
-	}
+	// NOTE: Thread info (RepliesTo) now in dependencies (Decision 004)
 	fmt.Printf("Status:  %s\n", issue.Status)
 	fmt.Println(strings.Repeat("─", 66))
 	fmt.Println()
@@ -592,10 +589,11 @@ func runMailReply(cmd *cobra.Command, args []string) error {
 		Assignee:    recipient,
 		Sender:      sender,
 		Ephemeral:   true,
-		RepliesTo:   messageID, // Thread link
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		// NOTE: RepliesTo now handled via dependency API (Decision 004)
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
+	_ = messageID // RepliesTo handled via CreateArgs.RepliesTo -> server creates dependency
 
 	if daemonClient != nil {
 		// Daemon mode - create reply with all messaging fields

@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/rpc"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/utils"
@@ -973,6 +974,7 @@ var closeCmd = &cobra.Command{
 			reason = "Closed"
 		}
 		jsonOutput, _ := cmd.Flags().GetBool("json")
+		force, _ := cmd.Flags().GetBool("force")
 
 		ctx := rootCtx
 
@@ -1006,6 +1008,21 @@ var closeCmd = &cobra.Command{
 		if daemonClient != nil {
 			closedIssues := []*types.Issue{}
 			for _, id := range resolvedIDs {
+				// Check if issue is pinned (bd-6v2)
+				if !force {
+					showArgs := &rpc.ShowArgs{ID: id}
+					showResp, showErr := daemonClient.Show(showArgs)
+					if showErr == nil {
+						var issue types.Issue
+						if json.Unmarshal(showResp.Data, &issue) == nil {
+							if issue.Status == types.StatusPinned {
+								fmt.Fprintf(os.Stderr, "Error: cannot close pinned issue %s (use --force to override)\n", id)
+								continue
+							}
+						}
+					}
+				}
+
 				closeArgs := &rpc.CloseArgs{
 					ID:     id,
 					Reason: reason,
@@ -1041,6 +1058,15 @@ var closeCmd = &cobra.Command{
 		// Direct mode
 		closedIssues := []*types.Issue{}
 		for _, id := range resolvedIDs {
+			// Check if issue is pinned (bd-6v2)
+			if !force {
+				issue, _ := store.GetIssue(ctx, id)
+				if issue != nil && issue.Status == types.StatusPinned {
+					fmt.Fprintf(os.Stderr, "Error: cannot close pinned issue %s (use --force to override)\n", id)
+					continue
+				}
+			}
+
 			if err := store.CloseIssue(ctx, id, reason, actor); err != nil {
 				fmt.Fprintf(os.Stderr, "Error closing %s: %v\n", id, err)
 				continue
@@ -1116,20 +1142,26 @@ func showMessageThread(ctx context.Context, messageID string, jsonOutput bool) {
 		os.Exit(1)
 	}
 
-	// Find the root of the thread by following replies_to chain upward
+	// Find the root of the thread by following replies-to dependencies upward
+	// Per Decision 004, RepliesTo is now stored as a dependency, not an Issue field
 	rootMsg := startMsg
 	seen := make(map[string]bool)
 	seen[rootMsg.ID] = true
 
-	for rootMsg.RepliesTo != "" {
-		if seen[rootMsg.RepliesTo] {
+	for {
+		// Find parent via replies-to dependency
+		parentID := findRepliesTo(ctx, rootMsg.ID, daemonClient, store)
+		if parentID == "" {
+			break // No parent, this is the root
+		}
+		if seen[parentID] {
 			break // Avoid infinite loops
 		}
-		seen[rootMsg.RepliesTo] = true
+		seen[parentID] = true
 
 		var parentMsg *types.Issue
 		if daemonClient != nil {
-			resp, err := daemonClient.Show(&rpc.ShowArgs{ID: rootMsg.RepliesTo})
+			resp, err := daemonClient.Show(&rpc.ShowArgs{ID: parentID})
 			if err != nil {
 				break // Parent not found, use current as root
 			}
@@ -1137,7 +1169,7 @@ func showMessageThread(ctx context.Context, messageID string, jsonOutput bool) {
 				break
 			}
 		} else {
-			parentMsg, _ = store.GetIssue(ctx, rootMsg.RepliesTo)
+			parentMsg, _ = store.GetIssue(ctx, parentID)
 		}
 		if parentMsg == nil {
 			break
@@ -1147,8 +1179,10 @@ func showMessageThread(ctx context.Context, messageID string, jsonOutput bool) {
 
 	// Now collect all messages in the thread
 	// Start from root and find all replies
+	// Build a map of child ID -> parent ID for display purposes
 	threadMessages := []*types.Issue{rootMsg}
 	threadIDs := map[string]bool{rootMsg.ID: true}
+	repliesTo := map[string]string{} // child ID -> parent ID
 	queue := []string{rootMsg.ID}
 
 	// BFS to find all replies
@@ -1156,39 +1190,17 @@ func showMessageThread(ctx context.Context, messageID string, jsonOutput bool) {
 		currentID := queue[0]
 		queue = queue[1:]
 
-		// Find all messages that reply to currentID
-		var replies []*types.Issue
-		if daemonClient != nil {
-			// In daemon mode, search for messages with replies_to = currentID
-			// Use list with a filter (simplified: we'll search all messages)
-			// This is inefficient but works for now
-			listArgs := &rpc.ListArgs{IssueType: "message"}
-			resp, err := daemonClient.List(listArgs)
-			if err == nil {
-				var allMessages []*types.Issue
-				if err := json.Unmarshal(resp.Data, &allMessages); err == nil {
-					for _, msg := range allMessages {
-						if msg.RepliesTo == currentID && !threadIDs[msg.ID] {
-							replies = append(replies, msg)
-						}
-					}
-				}
-			}
-		} else {
-			// Direct mode - search for replies
-			messageType := types.TypeMessage
-			filter := types.IssueFilter{IssueType: &messageType}
-			allMessages, _ := store.SearchIssues(ctx, "", filter)
-			for _, msg := range allMessages {
-				if msg.RepliesTo == currentID && !threadIDs[msg.ID] {
-					replies = append(replies, msg)
-				}
-			}
-		}
+		// Find all messages that reply to currentID via replies-to dependency
+		// Per Decision 004, replies are found via dependents with type replies-to
+		replies := findReplies(ctx, currentID, daemonClient, store)
 
 		for _, reply := range replies {
+			if threadIDs[reply.ID] {
+				continue // Already seen
+			}
 			threadMessages = append(threadMessages, reply)
 			threadIDs[reply.ID] = true
+			repliesTo[reply.ID] = currentID // Track parent for display
 			queue = append(queue, reply.ID)
 		}
 	}
@@ -1213,18 +1225,12 @@ func showMessageThread(ctx context.Context, messageID string, jsonOutput bool) {
 	fmt.Println(strings.Repeat("─", 66))
 
 	for _, msg := range threadMessages {
-		// Show indent based on depth (count replies_to chain)
+		// Show indent based on depth (count replies_to chain using our map)
 		depth := 0
-		parent := msg.RepliesTo
+		parent := repliesTo[msg.ID]
 		for parent != "" && depth < 5 {
 			depth++
-			// Find parent to get its replies_to
-			for _, m := range threadMessages {
-				if m.ID == parent {
-					parent = m.RepliesTo
-					break
-				}
-			}
+			parent = repliesTo[parent]
 		}
 		indent := strings.Repeat("  ", depth)
 
@@ -1239,8 +1245,8 @@ func showMessageThread(ctx context.Context, messageID string, jsonOutput bool) {
 
 		fmt.Printf("%s%s %s %s\n", indent, statusIcon, cyan(msg.ID), dim(timeStr))
 		fmt.Printf("%s  From: %s  To: %s\n", indent, msg.Sender, msg.Assignee)
-		if msg.RepliesTo != "" {
-			fmt.Printf("%s  Re: %s\n", indent, msg.RepliesTo)
+		if parentID := repliesTo[msg.ID]; parentID != "" {
+			fmt.Printf("%s  Re: %s\n", indent, parentID)
 		}
 		fmt.Printf("%s  %s: %s\n", indent, dim("Subject"), msg.Title)
 		if msg.Description != "" {
@@ -1256,6 +1262,94 @@ func showMessageThread(ctx context.Context, messageID string, jsonOutput bool) {
 	fmt.Printf("Total: %d messages in thread\n\n", len(threadMessages))
 }
 
+// findRepliesTo finds the parent ID that this issue replies to via replies-to dependency.
+// Returns empty string if no parent found.
+func findRepliesTo(ctx context.Context, issueID string, daemonClient *rpc.Client, store storage.Storage) string {
+	if daemonClient != nil {
+		// In daemon mode, use Show to get dependencies with metadata
+		resp, err := daemonClient.Show(&rpc.ShowArgs{ID: issueID})
+		if err != nil {
+			return ""
+		}
+		// Parse the full show response to get dependencies
+		type showResponse struct {
+			Dependencies []struct {
+				ID             string `json:"id"`
+				DependencyType string `json:"dependency_type"`
+			} `json:"dependencies"`
+		}
+		var details showResponse
+		if err := json.Unmarshal(resp.Data, &details); err != nil {
+			return ""
+		}
+		for _, dep := range details.Dependencies {
+			if dep.DependencyType == string(types.DepRepliesTo) {
+				return dep.ID
+			}
+		}
+		return ""
+	}
+	// Direct mode - query storage
+	if sqliteStore, ok := store.(*sqlite.SQLiteStorage); ok {
+		deps, err := sqliteStore.GetDependenciesWithMetadata(ctx, issueID)
+		if err != nil {
+			return ""
+		}
+		for _, dep := range deps {
+			if dep.DependencyType == types.DepRepliesTo {
+				return dep.ID
+			}
+		}
+	}
+	return ""
+}
+
+// findReplies finds all issues that reply to this issue via replies-to dependency.
+func findReplies(ctx context.Context, issueID string, daemonClient *rpc.Client, store storage.Storage) []*types.Issue {
+	if daemonClient != nil {
+		// In daemon mode, use Show to get dependents with metadata
+		resp, err := daemonClient.Show(&rpc.ShowArgs{ID: issueID})
+		if err != nil {
+			return nil
+		}
+		// Parse the full show response to get dependents
+		type showResponse struct {
+			Dependents []struct {
+				types.Issue
+				DependencyType string `json:"dependency_type"`
+			} `json:"dependents"`
+		}
+		var details showResponse
+		if err := json.Unmarshal(resp.Data, &details); err != nil {
+			return nil
+		}
+		var replies []*types.Issue
+		for _, dep := range details.Dependents {
+			if dep.DependencyType == string(types.DepRepliesTo) {
+				issue := dep.Issue // Copy to avoid aliasing
+				replies = append(replies, &issue)
+			}
+		}
+		return replies
+	}
+	// Direct mode - query storage
+	if sqliteStore, ok := store.(*sqlite.SQLiteStorage); ok {
+		deps, err := sqliteStore.GetDependentsWithMetadata(ctx, issueID)
+		if err != nil {
+			return nil
+		}
+		var replies []*types.Issue
+		for _, dep := range deps {
+			if dep.DependencyType == types.DepRepliesTo {
+				issue := dep.Issue // Copy to avoid aliasing
+				replies = append(replies, &issue)
+			}
+		}
+		return replies
+	}
+	return nil
+}
+
 func init() {
 	showCmd.Flags().Bool("json", false, "Output JSON format")
 	showCmd.Flags().Bool("thread", false, "Show full conversation thread (for messages)")
@@ -1264,7 +1358,7 @@ func init() {
 	updateCmd.Flags().StringP("status", "s", "", "New status")
 	registerPriorityFlag(updateCmd, "")
 	updateCmd.Flags().String("title", "", "New title")
-	updateCmd.Flags().StringP("type", "t", "", "New type (bug|feature|task|epic|chore)")
+	updateCmd.Flags().StringP("type", "t", "", "New type (bug|feature|task|epic|chore|merge-request)")
 	registerCommonIssueFlags(updateCmd)
 	updateCmd.Flags().String("notes", "", "Additional notes")
 	updateCmd.Flags().String("acceptance-criteria", "", "DEPRECATED: use --acceptance")
@@ -1286,5 +1380,6 @@ func init() {
 
 	closeCmd.Flags().StringP("reason", "r", "", "Reason for closing")
 	closeCmd.Flags().Bool("json", false, "Output JSON format")
+	closeCmd.Flags().BoolP("force", "f", false, "Force close pinned issues")
 	rootCmd.AddCommand(closeCmd)
 }

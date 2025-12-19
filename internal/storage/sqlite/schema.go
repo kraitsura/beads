@@ -34,10 +34,10 @@ CREATE TABLE IF NOT EXISTS issues (
     -- Messaging fields (bd-kwro)
     sender TEXT DEFAULT '',
     ephemeral INTEGER DEFAULT 0,
-    replies_to TEXT DEFAULT '',
-    relates_to TEXT DEFAULT '',
-    duplicate_of TEXT DEFAULT '',
-    superseded_by TEXT DEFAULT '',
+    -- Pinned field (bd-7h5)
+    pinned INTEGER DEFAULT 0,
+    -- NOTE: replies_to, relates_to, duplicate_of, superseded_by removed per Decision 004
+    -- These relationships are now stored in the dependencies table
     CHECK ((status = 'closed') = (closed_at IS NOT NULL))
 );
 
@@ -48,13 +48,15 @@ CREATE INDEX IF NOT EXISTS idx_issues_created_at ON issues(created_at);
 -- Note: idx_issues_external_ref is created in migrations/002_external_ref_column.go
 -- Note: idx_issues_review_status and idx_issues_reviewed_at are created in migrations/019_review_columns.go
 
--- Dependencies table
+-- Dependencies table (edge schema - Decision 004)
 CREATE TABLE IF NOT EXISTS dependencies (
     issue_id TEXT NOT NULL,
     depends_on_id TEXT NOT NULL,
     type TEXT NOT NULL DEFAULT 'blocks',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     created_by TEXT NOT NULL,
+    metadata TEXT DEFAULT '{}',    -- JSON blob for type-specific edge data
+    thread_id TEXT DEFAULT '',     -- For efficient conversation threading queries
     PRIMARY KEY (issue_id, depends_on_id),
     FOREIGN KEY (issue_id) REFERENCES issues(id) ON DELETE CASCADE,
     FOREIGN KEY (depends_on_id) REFERENCES issues(id) ON DELETE CASCADE
@@ -64,6 +66,9 @@ CREATE INDEX IF NOT EXISTS idx_dependencies_issue ON dependencies(issue_id);
 CREATE INDEX IF NOT EXISTS idx_dependencies_depends_on ON dependencies(depends_on_id);
 CREATE INDEX IF NOT EXISTS idx_dependencies_depends_on_type ON dependencies(depends_on_id, type);
 CREATE INDEX IF NOT EXISTS idx_dependencies_depends_on_type_issue ON dependencies(depends_on_id, type, issue_id);
+-- NOTE: idx_dependencies_thread and idx_dependencies_thread_type are created by
+-- migration 020_edge_consolidation.go after adding the thread_id column.
+-- They cannot be in the schema because existing databases may not have thread_id yet.
 
 -- Labels table
 CREATE TABLE IF NOT EXISTS labels (
