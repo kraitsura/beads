@@ -2,6 +2,7 @@ package rpc
 
 import (
 	"encoding/json"
+	"time"
 )
 
 // Operation constants for all bd commands
@@ -22,7 +23,6 @@ const (
 	OpDepAdd          = "dep_add"
 	OpDepRemove       = "dep_remove"
 	OpDepTree         = "dep_tree"
-	OpBlocked         = "blocked"
 	OpLabelAdd        = "label_add"
 	OpLabelRemove     = "label_remove"
 	OpCommentList     = "comment_list"
@@ -38,6 +38,13 @@ const (
 	OpGetMutations    = "get_mutations"
 	OpShutdown        = "shutdown"
 	OpDelete          = "delete"
+
+	// Gate operations (bd-likt)
+	OpGateCreate = "gate_create"
+	OpGateList   = "gate_list"
+	OpGateShow   = "gate_show"
+	OpGateClose  = "gate_close"
+	OpGateWait   = "gate_wait"
 )
 
 // Request represents an RPC request from client to daemon
@@ -73,9 +80,12 @@ type CreateArgs struct {
 	EstimatedMinutes   *int     `json:"estimated_minutes,omitempty"` // Time estimate in minutes
 	Labels             []string `json:"labels,omitempty"`
 	Dependencies       []string `json:"dependencies,omitempty"`
+	// Waits-for dependencies (bd-xo1o.2)
+	WaitsFor     string `json:"waits_for,omitempty"`      // Spawner issue ID to wait for
+	WaitsForGate string `json:"waits_for_gate,omitempty"` // Gate type: all-children or any-children
 	// Messaging fields (bd-kwro)
-	Sender    string `json:"sender,omitempty"`     // Who sent this (for messages)
-	Ephemeral bool   `json:"ephemeral,omitempty"`  // Can be bulk-deleted when closed
+	Sender string `json:"sender,omitempty"` // Who sent this (for messages)
+	Wisp   bool   `json:"wisp,omitempty"`   // Wisp = ephemeral vapor from the Steam Engine; bulk-deleted when closed
 	RepliesTo string `json:"replies_to,omitempty"` // Issue ID for conversation threading
 }
 
@@ -97,13 +107,15 @@ type UpdateArgs struct {
 	RemoveLabels       []string `json:"remove_labels,omitempty"`
 	SetLabels          []string `json:"set_labels,omitempty"`
 	// Messaging fields (bd-kwro)
-	Sender    *string `json:"sender,omitempty"`     // Who sent this (for messages)
-	Ephemeral *bool   `json:"ephemeral,omitempty"`  // Can be bulk-deleted when closed
+	Sender *string `json:"sender,omitempty"` // Who sent this (for messages)
+	Wisp   *bool   `json:"wisp,omitempty"`   // Wisp = ephemeral vapor from the Steam Engine; bulk-deleted when closed
 	RepliesTo *string `json:"replies_to,omitempty"` // Issue ID for conversation threading
 	// Graph link fields (bd-fu83)
 	RelatesTo    *string `json:"relates_to,omitempty"`    // JSON array of related issue IDs
 	DuplicateOf  *string `json:"duplicate_of,omitempty"`  // Canonical issue ID if duplicate
 	SupersededBy *string `json:"superseded_by,omitempty"` // Replacement issue ID if obsolete
+	// Pinned field (bd-iea)
+	Pinned *bool `json:"pinned,omitempty"` // If true, issue is a persistent context marker
 }
 
 // CloseArgs represents arguments for the close operation
@@ -155,6 +167,15 @@ type ListArgs struct {
 	// Priority range
 	PriorityMin *int `json:"priority_min,omitempty"`
 	PriorityMax *int `json:"priority_max,omitempty"`
+
+	// Pinned filtering (bd-p8e)
+	Pinned *bool `json:"pinned,omitempty"`
+
+	// Template filtering (beads-1ra)
+	IncludeTemplates bool `json:"include_templates,omitempty"`
+
+	// Parent filtering (bd-yqhh)
+	ParentID string `json:"parent_id,omitempty"`
 }
 
 // CountArgs represents arguments for the count operation
@@ -207,15 +228,14 @@ type ResolveIDArgs struct {
 
 // ReadyArgs represents arguments for the ready operation
 type ReadyArgs struct {
-	Assignee       string   `json:"assignee,omitempty"`
-	Unassigned     bool     `json:"unassigned,omitempty"`
-	Priority       *int     `json:"priority,omitempty"`
-	Limit          int      `json:"limit,omitempty"`
-	SortPolicy     string   `json:"sort_policy,omitempty"`
-	Labels         []string `json:"labels,omitempty"`
-	LabelsAny      []string `json:"labels_any,omitempty"`
-	ApprovedOnly   bool     `json:"approved_only,omitempty"`   // Filter for approved issues only
-	UnreviewedOnly bool     `json:"unreviewed_only,omitempty"` // Filter for unreviewed issues only
+	Assignee   string   `json:"assignee,omitempty"`
+	Unassigned bool     `json:"unassigned,omitempty"`
+	Priority   *int     `json:"priority,omitempty"`
+	Type       string   `json:"type,omitempty"`
+	Limit      int      `json:"limit,omitempty"`
+	SortPolicy string   `json:"sort_policy,omitempty"`
+	Labels     []string `json:"labels,omitempty"`
+	LabelsAny  []string `json:"labels_any,omitempty"`
 }
 
 // StaleArgs represents arguments for the stale command
@@ -243,12 +263,7 @@ type DepRemoveArgs struct {
 type DepTreeArgs struct {
 	ID       string `json:"id"`
 	MaxDepth int    `json:"max_depth,omitempty"`
-	Reverse  bool   `json:"reverse,omitempty"` // true=show dependents (children), false=show dependencies (blockers)
 }
-
-// BlockedArgs represents arguments for the blocked operation
-// No arguments needed - returns all blocked issues
-type BlockedArgs struct{}
 
 // LabelAddArgs represents arguments for adding a label
 type LabelAddArgs struct {
@@ -299,6 +314,7 @@ type StatusResponse struct {
 	// Daemon configuration
 	AutoCommit   bool   `json:"auto_commit"`            // Whether auto-commit is enabled
 	AutoPush     bool   `json:"auto_push"`              // Whether auto-push is enabled
+	AutoPull     bool   `json:"auto_pull"`              // Whether auto-pull is enabled (periodic remote sync)
 	LocalMode    bool   `json:"local_mode"`             // Whether running in local-only mode (no git)
 	SyncInterval string `json:"sync_interval"`          // Sync interval (e.g., "5s")
 	DaemonMode   string `json:"daemon_mode"`            // Sync mode: "poll" or "events"
@@ -404,4 +420,47 @@ type ImportArgs struct {
 // GetMutationsArgs represents arguments for retrieving recent mutations
 type GetMutationsArgs struct {
 	Since int64 `json:"since"` // Unix timestamp in milliseconds (0 for all recent)
+}
+
+// Gate operations (bd-likt)
+
+// GateCreateArgs represents arguments for creating a gate
+type GateCreateArgs struct {
+	Title     string        `json:"title"`
+	AwaitType string        `json:"await_type"` // gh:run, gh:pr, timer, human, mail
+	AwaitID   string        `json:"await_id"`   // ID/value for the await type
+	Timeout   time.Duration `json:"timeout"`    // Timeout duration
+	Waiters   []string      `json:"waiters"`    // Mail addresses to notify when gate clears
+}
+
+// GateCreateResult represents the result of creating a gate
+type GateCreateResult struct {
+	ID string `json:"id"` // Created gate ID
+}
+
+// GateListArgs represents arguments for listing gates
+type GateListArgs struct {
+	All bool `json:"all"` // Include closed gates
+}
+
+// GateShowArgs represents arguments for showing a gate
+type GateShowArgs struct {
+	ID string `json:"id"` // Gate ID (partial or full)
+}
+
+// GateCloseArgs represents arguments for closing a gate
+type GateCloseArgs struct {
+	ID     string `json:"id"`               // Gate ID (partial or full)
+	Reason string `json:"reason,omitempty"` // Close reason
+}
+
+// GateWaitArgs represents arguments for adding waiters to a gate
+type GateWaitArgs struct {
+	ID      string   `json:"id"`      // Gate ID (partial or full)
+	Waiters []string `json:"waiters"` // Additional waiters to add
+}
+
+// GateWaitResult represents the result of adding waiters
+type GateWaitResult struct {
+	AddedCount int `json:"added_count"` // Number of new waiters added
 }

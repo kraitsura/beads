@@ -24,7 +24,7 @@ func (s *SQLiteStorage) AddDependency(ctx context.Context, dep *types.Dependency
 		return fmt.Errorf("invalid dependency type: %q (must be non-empty string, max 50 chars)", dep.Type)
 	}
 
-	// Validate that both issues exist
+	// Validate that source issue exists
 	issueExists, err := s.GetIssue(ctx, dep.IssueID)
 	if err != nil {
 		return fmt.Errorf("failed to check issue %s: %w", dep.IssueID, err)
@@ -33,31 +33,38 @@ func (s *SQLiteStorage) AddDependency(ctx context.Context, dep *types.Dependency
 		return fmt.Errorf("issue %s not found", dep.IssueID)
 	}
 
-	dependsOnExists, err := s.GetIssue(ctx, dep.DependsOnID)
-	if err != nil {
-		return fmt.Errorf("failed to check dependency %s: %w", dep.DependsOnID, err)
-	}
-	if dependsOnExists == nil {
-		return fmt.Errorf("dependency target %s not found", dep.DependsOnID)
-	}
+	// External refs (external:<project>:<capability>) don't need target validation (bd-zmmy)
+	// They are resolved lazily at query time by CheckExternalDep
+	isExternalRef := strings.HasPrefix(dep.DependsOnID, "external:")
 
-	// Prevent self-dependency
-	if dep.IssueID == dep.DependsOnID {
-		return fmt.Errorf("issue cannot depend on itself")
-	}
+	var dependsOnExists *types.Issue
+	if !isExternalRef {
+		dependsOnExists, err = s.GetIssue(ctx, dep.DependsOnID)
+		if err != nil {
+			return fmt.Errorf("failed to check dependency %s: %w", dep.DependsOnID, err)
+		}
+		if dependsOnExists == nil {
+			return fmt.Errorf("dependency target %s not found", dep.DependsOnID)
+		}
 
-	// Validate parent-child dependency direction
-	// In parent-child relationships: child depends on parent (child is part of parent)
-	// Parent should NOT depend on child (semantically backwards)
-	// Consistent with dependency semantics: IssueID depends on DependsOnID
-	if dep.Type == types.DepParentChild {
-		// issueExists is the dependent (the one that depends on something)
-		// dependsOnExists is what it depends on
-		// Correct: Task (child) depends on Epic (parent) - child belongs to parent
-		// Incorrect: Epic (parent) depends on Task (child) - backwards
-		if issueExists.IssueType == types.TypeEpic && dependsOnExists.IssueType != types.TypeEpic {
-			return fmt.Errorf("invalid parent-child dependency: parent (%s) cannot depend on child (%s). Use: bd dep add %s %s --type parent-child",
-				dep.IssueID, dep.DependsOnID, dep.DependsOnID, dep.IssueID)
+		// Prevent self-dependency (only for local deps)
+		if dep.IssueID == dep.DependsOnID {
+			return fmt.Errorf("issue cannot depend on itself")
+		}
+
+		// Validate parent-child dependency direction (only for local deps)
+		// In parent-child relationships: child depends on parent (child is part of parent)
+		// Parent should NOT depend on child (semantically backwards)
+		// Consistent with dependency semantics: IssueID depends on DependsOnID
+		if dep.Type == types.DepParentChild {
+			// issueExists is the dependent (the one that depends on something)
+			// dependsOnExists is what it depends on
+			// Correct: Task (child) depends on Epic (parent) - child belongs to parent
+			// Incorrect: Epic (parent) depends on Task (child) - backwards
+			if issueExists.IssueType == types.TypeEpic && dependsOnExists.IssueType != types.TypeEpic {
+				return fmt.Errorf("invalid parent-child dependency: parent (%s) cannot depend on child (%s). Use: bd dep add %s %s --type parent-child",
+					dep.IssueID, dep.DependsOnID, dep.DependsOnID, dep.IssueID)
+			}
 		}
 	}
 
@@ -152,9 +159,13 @@ func (s *SQLiteStorage) AddDependency(ctx context.Context, dep *types.Dependency
 		return fmt.Errorf("failed to record event: %w", err)
 	}
 
-		// Mark both issues as dirty for incremental export
-		// (dependencies are exported with each issue, so both need updating)
-		if err := markIssuesDirtyTx(ctx, tx, []string{dep.IssueID, dep.DependsOnID}); err != nil {
+		// Mark issues as dirty for incremental export
+		// For external refs, only mark the source issue (target doesn't exist locally)
+		issueIDsToMark := []string{dep.IssueID}
+		if !isExternalRef {
+			issueIDsToMark = append(issueIDsToMark, dep.DependsOnID)
+		}
+		if err := markIssuesDirtyTx(ctx, tx, issueIDsToMark); err != nil {
 			return wrapDBError("mark issues dirty after adding dependency", err)
 		}
 
@@ -210,8 +221,13 @@ func (s *SQLiteStorage) RemoveDependency(ctx context.Context, issueID, dependsOn
 			return fmt.Errorf("failed to record event: %w", err)
 		}
 
-		// Mark both issues as dirty for incremental export
-		if err := markIssuesDirtyTx(ctx, tx, []string{issueID, dependsOnID}); err != nil {
+		// Mark issues as dirty for incremental export
+		// For external refs, only mark the source issue (target doesn't exist locally)
+		issueIDsToMark := []string{issueID}
+		if !strings.HasPrefix(dependsOnID, "external:") {
+			issueIDsToMark = append(issueIDsToMark, dependsOnID)
+		}
+		if err := markIssuesDirtyTx(ctx, tx, issueIDsToMark); err != nil {
 			return wrapDBError("mark issues dirty after removing dependency", err)
 		}
 
@@ -233,7 +249,8 @@ func (s *SQLiteStorage) GetDependenciesWithMetadata(ctx context.Context, issueID
 		       i.status, i.priority, i.issue_type, i.assignee, i.estimated_minutes,
 		       i.created_at, i.updated_at, i.closed_at, i.external_ref, i.source_repo,
 		       i.deleted_at, i.deleted_by, i.delete_reason, i.original_type,
-		       i.sender, i.ephemeral, i.pinned,
+		       i.sender, i.ephemeral, i.pinned, i.is_template,
+		       i.await_type, i.await_id, i.timeout_ns, i.waiters,
 		       d.type
 		FROM issues i
 		JOIN dependencies d ON i.id = d.depends_on_id
@@ -255,7 +272,8 @@ func (s *SQLiteStorage) GetDependentsWithMetadata(ctx context.Context, issueID s
 		       i.status, i.priority, i.issue_type, i.assignee, i.estimated_minutes,
 		       i.created_at, i.updated_at, i.closed_at, i.external_ref, i.source_repo,
 		       i.deleted_at, i.deleted_by, i.delete_reason, i.original_type,
-		       i.sender, i.ephemeral, i.pinned,
+		       i.sender, i.ephemeral, i.pinned, i.is_template,
+		       i.await_type, i.await_id, i.timeout_ns, i.waiters,
 		       d.type
 		FROM issues i
 		JOIN dependencies d ON i.id = d.issue_id
@@ -609,13 +627,104 @@ func (s *SQLiteStorage) GetDependencyTree(ctx context.Context, issueID string, m
 		nodes = append(nodes, &node)
 	}
 
+	// Fetch external dependencies for all issues in the tree (bd-vks2)
+	// External deps like "external:project:capability" don't exist in the issues
+	// table, so the recursive CTE above doesn't find them. We add them as
+	// synthetic leaf nodes here.
+	if len(nodes) > 0 && !reverse {
+		// Collect all issue IDs in the tree
+		issueIDs := make([]string, len(nodes))
+		depthByID := make(map[string]int)
+		for i, n := range nodes {
+			issueIDs[i] = n.ID
+			depthByID[n.ID] = n.Depth
+		}
+
+		// Query for external dependencies
+		externalDeps, err := s.getExternalDepsForIssues(ctx, issueIDs)
+		if err != nil {
+			// Non-fatal: just skip external deps if query fails
+			_ = err
+		} else {
+			// Create synthetic TreeNode for each external dep
+			for parentID, extRefs := range externalDeps {
+				parentDepth, ok := depthByID[parentID]
+				if !ok {
+					continue
+				}
+				// Skip if we've exceeded maxDepth
+				if parentDepth >= maxDepth {
+					continue
+				}
+
+				for _, ref := range extRefs {
+					// Parse external ref for display
+					_, capability := parseExternalRefParts(ref)
+					if capability == "" {
+						capability = ref // fallback to full ref
+					}
+
+					// Check resolution status
+					status := CheckExternalDep(ctx, ref)
+					var nodeStatus types.Status
+					var title string
+					if status.Satisfied {
+						nodeStatus = types.StatusClosed
+						title = fmt.Sprintf("✓ %s", capability)
+					} else {
+						nodeStatus = types.StatusBlocked
+						title = fmt.Sprintf("⏳ %s", capability)
+					}
+
+					extNode := &types.TreeNode{
+						Issue: types.Issue{
+							ID:        ref,
+							Title:     title,
+							Status:    nodeStatus,
+							Priority:  0, // External deps don't have priority
+							IssueType: types.TypeTask,
+						},
+						Depth:    parentDepth + 1,
+						ParentID: parentID,
+					}
+
+					// Apply deduplication if needed
+					if !showAllPaths {
+						if _, exists := seen[ref]; exists {
+							continue
+						}
+						seen[ref] = extNode.Depth
+					}
+
+					nodes = append(nodes, extNode)
+				}
+			}
+		}
+	}
+
 	return nodes, nil
 }
 
+// parseExternalRefParts parses "external:project:capability" and returns (project, capability).
+// Returns empty strings if the format is invalid.
+func parseExternalRefParts(ref string) (project, capability string) {
+	if !strings.HasPrefix(ref, "external:") {
+		return "", ""
+	}
+	parts := strings.SplitN(ref, ":", 3)
+	if len(parts) != 3 {
+		return "", ""
+	}
+	return parts[1], parts[2]
+}
+
 // DetectCycles finds circular dependencies and returns the actual cycle paths
+// Note: relates-to dependencies are excluded because they are intentionally bidirectional
+// ("see also" relationships) and do not represent problematic cycles.
 func (s *SQLiteStorage) DetectCycles(ctx context.Context) ([][]*types.Issue, error) {
 	// Use recursive CTE to find cycles with full paths
 	// We track the path as a string to work around SQLite's lack of arrays
+	// Exclude relates-to dependencies since they are inherently bidirectional
 	rows, err := s.db.QueryContext(ctx, `
 		WITH RECURSIVE paths AS (
 			SELECT
@@ -625,6 +734,7 @@ func (s *SQLiteStorage) DetectCycles(ctx context.Context) ([][]*types.Issue, err
 				issue_id || '→' || depends_on_id as path,
 				0 as depth
 			FROM dependencies
+			WHERE type != 'relates-to'
 
 			UNION ALL
 
@@ -636,7 +746,8 @@ func (s *SQLiteStorage) DetectCycles(ctx context.Context) ([][]*types.Issue, err
 			p.depth + 1
 			FROM dependencies d
 			JOIN paths p ON d.issue_id = p.depends_on_id
-			WHERE p.depth < ?
+			WHERE d.type != 'relates-to'
+			AND p.depth < ?
 			AND (d.depends_on_id = p.start_id OR p.path NOT LIKE '%' || d.depends_on_id || '→%')
 		)
 		SELECT DISTINCT path as cycle_path
@@ -713,9 +824,16 @@ func (s *SQLiteStorage) scanIssues(ctx context.Context, rows *sql.Rows) ([]*type
 		var originalType sql.NullString
 		// Messaging fields (bd-kwro)
 		var sender sql.NullString
-		var ephemeral sql.NullInt64
+		var wisp sql.NullInt64
 		// Pinned field (bd-7h5)
 		var pinned sql.NullInt64
+		// Template field (beads-1ra)
+		var isTemplate sql.NullInt64
+		// Gate fields (bd-udsi)
+		var awaitType sql.NullString
+		var awaitID sql.NullString
+		var timeoutNs sql.NullInt64
+		var waiters sql.NullString
 
 		err := rows.Scan(
 			&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Design,
@@ -723,7 +841,8 @@ func (s *SQLiteStorage) scanIssues(ctx context.Context, rows *sql.Rows) ([]*type
 			&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
 			&issue.CreatedAt, &issue.UpdatedAt, &closedAt, &externalRef, &sourceRepo, &closeReason,
 			&deletedAt, &deletedBy, &deleteReason, &originalType,
-			&sender, &ephemeral, &pinned,
+			&sender, &wisp, &pinned, &isTemplate,
+			&awaitType, &awaitID, &timeoutNs, &waiters,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan issue: %w", err)
@@ -765,12 +884,29 @@ func (s *SQLiteStorage) scanIssues(ctx context.Context, rows *sql.Rows) ([]*type
 		if sender.Valid {
 			issue.Sender = sender.String
 		}
-		if ephemeral.Valid && ephemeral.Int64 != 0 {
-			issue.Ephemeral = true
+		if wisp.Valid && wisp.Int64 != 0 {
+			issue.Wisp = true
 		}
 		// Pinned field (bd-7h5)
 		if pinned.Valid && pinned.Int64 != 0 {
 			issue.Pinned = true
+		}
+		// Template field (beads-1ra)
+		if isTemplate.Valid && isTemplate.Int64 != 0 {
+			issue.IsTemplate = true
+		}
+		// Gate fields (bd-udsi)
+		if awaitType.Valid {
+			issue.AwaitType = awaitType.String
+		}
+		if awaitID.Valid {
+			issue.AwaitID = awaitID.String
+		}
+		if timeoutNs.Valid {
+			issue.Timeout = time.Duration(timeoutNs.Int64)
+		}
+		if waiters.Valid && waiters.String != "" {
+			issue.Waiters = parseJSONStringArray(waiters.String)
 		}
 
 		issues = append(issues, &issue)
@@ -810,9 +946,16 @@ func (s *SQLiteStorage) scanIssuesWithDependencyType(ctx context.Context, rows *
 		var originalType sql.NullString
 		// Messaging fields (bd-kwro)
 		var sender sql.NullString
-		var ephemeral sql.NullInt64
+		var wisp sql.NullInt64
 		// Pinned field (bd-7h5)
 		var pinned sql.NullInt64
+		// Template field (beads-1ra)
+		var isTemplate sql.NullInt64
+		// Gate fields (bd-udsi)
+		var awaitType sql.NullString
+		var awaitID sql.NullString
+		var timeoutNs sql.NullInt64
+		var waiters sql.NullString
 		var depType types.DependencyType
 
 		err := rows.Scan(
@@ -821,7 +964,8 @@ func (s *SQLiteStorage) scanIssuesWithDependencyType(ctx context.Context, rows *
 			&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
 			&issue.CreatedAt, &issue.UpdatedAt, &closedAt, &externalRef, &sourceRepo,
 			&deletedAt, &deletedBy, &deleteReason, &originalType,
-			&sender, &ephemeral, &pinned,
+			&sender, &wisp, &pinned, &isTemplate,
+			&awaitType, &awaitID, &timeoutNs, &waiters,
 			&depType,
 		)
 		if err != nil {
@@ -861,12 +1005,29 @@ func (s *SQLiteStorage) scanIssuesWithDependencyType(ctx context.Context, rows *
 		if sender.Valid {
 			issue.Sender = sender.String
 		}
-		if ephemeral.Valid && ephemeral.Int64 != 0 {
-			issue.Ephemeral = true
+		if wisp.Valid && wisp.Int64 != 0 {
+			issue.Wisp = true
 		}
 		// Pinned field (bd-7h5)
 		if pinned.Valid && pinned.Int64 != 0 {
 			issue.Pinned = true
+		}
+		// Template field (beads-1ra)
+		if isTemplate.Valid && isTemplate.Int64 != 0 {
+			issue.IsTemplate = true
+		}
+		// Gate fields (bd-udsi)
+		if awaitType.Valid {
+			issue.AwaitType = awaitType.String
+		}
+		if awaitID.Valid {
+			issue.AwaitID = awaitID.String
+		}
+		if timeoutNs.Valid {
+			issue.Timeout = time.Duration(timeoutNs.Int64)
+		}
+		if waiters.Valid && waiters.String != "" {
+			issue.Waiters = parseJSONStringArray(waiters.String)
 		}
 
 		// Fetch labels for this issue

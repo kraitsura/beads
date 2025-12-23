@@ -28,23 +28,21 @@ from beads_mcp.models import (
     BlockedIssue,
     BriefDep,
     BriefIssue,
-    BriefTreeNode,
     CompactedResult,
     DependencyType,
     Issue,
     IssueMinimal,
     IssueStatus,
     IssueType,
+    LinkedIssue,
     OperationResult,
     Stats,
 )
 from beads_mcp.tools import (
     beads_add_dependency,
+    beads_blocked,
     beads_close_issue,
-    beads_comment_add,
-    beads_comment_list,
     beads_create_issue,
-    beads_dep_tree,
     beads_detect_pollution,
     beads_get_schema_info,
     beads_init,
@@ -52,7 +50,6 @@ from beads_mcp.tools import (
     beads_list_issues,
     beads_quickstart,
     beads_ready_work,
-    beads_remove_dependency,
     beads_repair_deps,
     beads_reopen_issue,
     beads_show_issue,
@@ -124,43 +121,10 @@ mcp = FastMCP(
 We track work in Beads (bd) instead of Markdown.
 Check the resource beads://quickstart to see how.
 
-IMPORTANT: Call context(action="set", workspace_root="...") before write operations.
+CONTEXT OPTIMIZATION: Use discover_tools() to see available tools (names only),
+then get_tool_info(tool_name) for specific tool details. This saves context.
 
-## Quick Reference (11 tools)
-
-| Action | Tool | Example |
-|--------|------|---------|
-| Find work | ready(brief=True) | Scan available tasks |
-| List/search | list(query="auth", brief=True) | Search issues |
-| Blocked issues | list(status="blocked") | Shows blocked_by info |
-| Issue detail | show(id, fields=["id","dependencies"]) | Check specific issue |
-| Create | create(title="...") | New issue |
-| Update | update(id, status="in_progress") | Claim work |
-| Close/reopen | close(id) / close(action="reopen", issue_ids=[...]) | Complete/reopen |
-| Dependencies | dep(action="add|remove|tree", ...) | Manage deps |
-| Comments | comment(action="add|list", ...) | Track progress |
-| Statistics | stats() | Project overview |
-| Admin | admin(action="validate|repair|...", ...) | Diagnostics |
-| Context | context(action="set|show|init", ...) | Workspace setup |
-
-## Token Optimization
-
-- `brief=True`: Returns only {id, title, status} - use when scanning
-- `fields=["id", "dependencies"]`: Returns only specific fields
-- `max_description_length=100`: Truncates long descriptions
-- Write ops return minimal confirmation by default (use `verbose=True` for full)
-- `dep(action="tree", brief=True)`: Compact dependency tree
-
-## Filtering Issues
-
-- `labels=["bug"]`: Issues with ALL specified labels (AND)
-- `labels_any=["p0", "p1"]`: Issues with ANY specified label (OR)
-- `query="search term"`: Search in title/description
-- `unassigned=True`: Issues with no assignee
-
-## Suggest Next (Close)
-
-Use `close(issue_id, suggest_next=True)` to see issues unblocked by this close.
+IMPORTANT: Call context(workspace_root='...') to set your workspace before any write operations.
 """,
 )
 
@@ -253,7 +217,7 @@ def require_context(func: Callable[..., Awaitable[T]]) -> Callable[..., Awaitabl
     
     Passes if either:
     - workspace_root was provided on tool call (via ContextVar), OR
-    - BEADS_WORKING_DIR is set (from set_context)
+    - BEADS_WORKING_DIR is set (from context tool)
     
     Only enforces if BEADS_REQUIRE_CONTEXT=1 is set in environment.
     This allows backward compatibility while adding safety for multi-repo setups.
@@ -266,7 +230,7 @@ def require_context(func: Callable[..., Awaitable[T]]) -> Callable[..., Awaitabl
             workspace = current_workspace.get() or os.environ.get("BEADS_WORKING_DIR")
             if not workspace:
                 raise ValueError(
-                    "Context not set. Either provide workspace_root parameter or call set_context() first."
+                    "Context not set. Either provide workspace_root parameter or call context(workspace_root='...') first."
                 )
         return await func(*args, **kwargs)
     return wrapper
@@ -356,9 +320,8 @@ _TOOL_CATALOG = {
     "dep": "Add dependency between issues",
     "stats": "Get issue statistics",
     "blocked": "Show blocked issues and what blocks them",
-    "init": "Initialize beads in a directory",
-    "set_context": "Set workspace root for operations",
-    "where_am_i": "Show current workspace context",
+    "context": "Manage workspace context (set, show, init)",
+    "admin": "Administrative/diagnostic operations (validate, repair, schema, debug, migration, pollution)",
     "discover_tools": "List available tools (names only)",
     "get_tool_info": "Get detailed info for a specific tool",
 }
@@ -404,34 +367,52 @@ async def get_tool_info(tool_name: str) -> dict[str, Any]:
                 "limit": "int (1-100, default 10) - Max issues to return",
                 "priority": "int (0-4, optional) - Filter by priority",
                 "assignee": "str (optional) - Filter by assignee",
+                "labels": "list[str] (optional) - AND filter: must have ALL labels",
+                "labels_any": "list[str] (optional) - OR filter: must have at least one",
+                "unassigned": "bool (default false) - Only unassigned issues",
+                "sort_policy": "str (optional) - hybrid|priority|oldest",
+                "brief": "bool (default false) - Return only {id, title, status, priority}",
+                "fields": "list[str] (optional) - Custom field projection",
+                "max_description_length": "int (optional) - Truncate descriptions",
                 "workspace_root": "str (optional) - Workspace path"
             },
             "returns": "List of ready issues (minimal format for context efficiency)",
-            "example": "ready(limit=5, priority=1)"
+            "example": "ready(limit=5, priority=1, unassigned=True)"
         },
         "list": {
             "name": "list",
             "description": "List all issues with optional filters",
             "parameters": {
-                "status": "open|in_progress|blocked|closed (optional)",
+                "status": "open|in_progress|blocked|deferred|closed (optional)",
                 "priority": "int 0-4 (optional)",
                 "issue_type": "bug|feature|task|epic|chore (optional)",
                 "assignee": "str (optional)",
+                "labels": "list[str] (optional) - AND filter: must have ALL labels",
+                "labels_any": "list[str] (optional) - OR filter: must have at least one",
+                "query": "str (optional) - Search in title (case-insensitive)",
+                "unassigned": "bool (default false) - Only unassigned issues",
                 "limit": "int (1-100, default 20)",
+                "brief": "bool (default false) - Return only {id, title, status, priority}",
+                "fields": "list[str] (optional) - Custom field projection",
+                "max_description_length": "int (optional) - Truncate descriptions",
                 "workspace_root": "str (optional)"
             },
             "returns": "List of issues (compacted if >20 results)",
-            "example": "list(status='open', priority=1, limit=10)"
+            "example": "list(status='open', labels=['bug'], query='auth')"
         },
         "show": {
             "name": "show",
             "description": "Show full details for a specific issue including dependencies",
             "parameters": {
                 "issue_id": "str (required) - e.g., 'bd-a1b2'",
+                "brief": "bool (default false) - Return only {id, title, status, priority}",
+                "brief_deps": "bool (default false) - Full issue with compact dependencies",
+                "fields": "list[str] (optional) - Custom field projection",
+                "max_description_length": "int (optional) - Truncate description",
                 "workspace_root": "str (optional)"
             },
-            "returns": "Full Issue object with dependencies and dependents",
-            "example": "show(issue_id='bd-a1b2')"
+            "returns": "Full Issue object (or BriefIssue/dict based on params)",
+            "example": "show(issue_id='bd-a1b2', brief_deps=True)"
         },
         "create": {
             "name": "create",
@@ -444,9 +425,10 @@ async def get_tool_info(tool_name: str) -> dict[str, Any]:
                 "assignee": "str (optional)",
                 "labels": "list[str] (optional)",
                 "deps": "list[str] (optional) - dependency IDs",
+                "brief": "bool (default true) - Return OperationResult instead of full Issue",
                 "workspace_root": "str (optional)"
             },
-            "returns": "Created Issue object",
+            "returns": "OperationResult {id, action} or full Issue if brief=False",
             "example": "create(title='Fix auth bug', priority=1, issue_type='bug')"
         },
         "update": {
@@ -454,14 +436,15 @@ async def get_tool_info(tool_name: str) -> dict[str, Any]:
             "description": "Update an existing issue",
             "parameters": {
                 "issue_id": "str (required)",
-                "status": "open|in_progress|blocked|closed (optional)",
+                "status": "open|in_progress|blocked|deferred|closed (optional)",
                 "priority": "int 0-4 (optional)",
                 "assignee": "str (optional)",
                 "title": "str (optional)",
                 "description": "str (optional)",
+                "brief": "bool (default true) - Return OperationResult instead of full Issue",
                 "workspace_root": "str (optional)"
             },
-            "returns": "Updated Issue object",
+            "returns": "OperationResult {id, action} or full Issue if brief=False",
             "example": "update(issue_id='bd-a1b2', status='in_progress')"
         },
         "close": {
@@ -470,9 +453,10 @@ async def get_tool_info(tool_name: str) -> dict[str, Any]:
             "parameters": {
                 "issue_id": "str (required)",
                 "reason": "str (default 'Completed')",
+                "brief": "bool (default true) - Return OperationResult instead of full Issue",
                 "workspace_root": "str (optional)"
             },
-            "returns": "List of closed issues",
+            "returns": "List of OperationResult or full Issues if brief=False",
             "example": "close(issue_id='bd-a1b2', reason='Fixed in PR #123')"
         },
         "reopen": {
@@ -481,9 +465,10 @@ async def get_tool_info(tool_name: str) -> dict[str, Any]:
             "parameters": {
                 "issue_ids": "list[str] (required)",
                 "reason": "str (optional)",
+                "brief": "bool (default true) - Return OperationResult instead of full Issue",
                 "workspace_root": "str (optional)"
             },
-            "returns": "List of reopened issues",
+            "returns": "List of OperationResult or full Issues if brief=False",
             "example": "reopen(issue_ids=['bd-a1b2'], reason='Need more work')"
         },
         "dep": {
@@ -508,12 +493,41 @@ async def get_tool_info(tool_name: str) -> dict[str, Any]:
         "blocked": {
             "name": "blocked",
             "description": "Show blocked issues and what blocks them",
-            "parameters": {"workspace_root": "str (optional)"},
-            "returns": "List of blocked issues with blocker info",
-            "example": "blocked()"
+            "parameters": {
+                "brief": "bool (default false) - Return only {id, title, status, priority}",
+                "brief_deps": "bool (default false) - Full issues with compact dependencies",
+                "workspace_root": "str (optional)"
+            },
+            "returns": "List of BlockedIssue (or BriefIssue/dict based on params)",
+            "example": "blocked(brief=True)"
+        },
+        "admin": {
+            "name": "admin",
+            "description": "Administrative and diagnostic operations",
+            "parameters": {
+                "action": "str (required) - validate|repair|schema|debug|migration|pollution",
+                "checks": "str (optional) - For validate: orphans,duplicates,pollution,conflicts",
+                "fix_all": "bool (default false) - For validate: auto-fix issues",
+                "fix": "bool (default false) - For repair: apply fixes",
+                "clean": "bool (default false) - For pollution: delete test issues",
+                "workspace_root": "str (optional)"
+            },
+            "returns": "Dict with operation results (or string for debug)",
+            "example": "admin(action='validate', checks='orphans')"
+        },
+        "context": {
+            "name": "context",
+            "description": "Manage workspace context for beads operations",
+            "parameters": {
+                "action": "str (optional) - set|show|init (default: show if no args, set if workspace_root provided)",
+                "workspace_root": "str (optional) - Workspace path for set/init actions",
+                "prefix": "str (optional) - Issue ID prefix for init action"
+            },
+            "returns": "String with context information or confirmation",
+            "example": "context(action='set', workspace_root='/path/to/project')"
         },
     }
-    
+
     if tool_name not in tool_details:
         available = list(tool_details.keys())
         return {
@@ -525,102 +539,144 @@ async def get_tool_info(tool_name: str) -> dict[str, Any]:
     return tool_details[tool_name]
 
 
-# Context management tools
+# Context management tool - unified set_context, where_am_i, and init
 @mcp.tool(
     name="context",
-    description="""Manage workspace context.
+    description="""Manage workspace context for beads operations.
 Actions:
-- set: Set workspace root directory (required before write operations)
-- show: Show current workspace context and database path
-- init: Initialize new beads database (creates .beads/ directory)""",
+- set: Set the workspace root directory (default when workspace_root provided)
+- show: Show current workspace context and database path (default when no args)
+- init: Initialize beads in the current workspace directory""",
 )
 async def context(
-    action: str,  # "set", "show", "init"
+    action: str | None = None,
     workspace_root: str | None = None,
     prefix: str | None = None,
 ) -> str:
-    """Manage workspace context."""
+    """Manage workspace context for beads operations.
+
+    Args:
+        action: Action to perform - set, show, or init (inferred if not provided)
+        workspace_root: Workspace path for set/init actions
+        prefix: Issue ID prefix for init action
+
+    Returns:
+        Context information or confirmation message
+    """
+    # Infer action if not explicitly provided
+    if action is None:
+        if workspace_root is not None:
+            action = "set"
+        else:
+            action = "show"
+
+    action = action.lower()
 
     if action == "set":
-        if not workspace_root:
-            raise ValueError("workspace_root required for set action")
-
-        # Resolve to git repo root if possible
-        try:
-            resolved_root = await asyncio.wait_for(
-                asyncio.to_thread(_resolve_workspace_root, workspace_root),
-                timeout=5.0,
-            )
-        except asyncio.TimeoutError:
-            logger.error(f"Git detection timed out after 5s for: {workspace_root}")
-            return (
-                f"Error: Git repository detection timed out.\n"
-                f"  Provided path: {workspace_root}\n"
-                f"  This may indicate a slow filesystem or git configuration issue."
-            )
-
-        # Store in persistent context
-        _workspace_context["BEADS_WORKING_DIR"] = resolved_root
-        _workspace_context["BEADS_CONTEXT_SET"] = "1"
-        os.environ["BEADS_WORKING_DIR"] = resolved_root
-        os.environ["BEADS_CONTEXT_SET"] = "1"
-
-        # Find beads database
-        db_path = _find_beads_db(resolved_root)
-
-        if db_path is None:
-            _workspace_context.pop("BEADS_DB", None)
-            os.environ.pop("BEADS_DB", None)
-            return (
-                f"Context set successfully:\n"
-                f"  Workspace root: {resolved_root}\n"
-                f"  Database: Not found (run context(action='init') to create)"
-            )
-
-        _workspace_context["BEADS_DB"] = db_path
-        os.environ["BEADS_DB"] = db_path
-
-        return (
-            f"Context set successfully:\n"
-            f"  Workspace root: {resolved_root}\n"
-            f"  Database: {db_path}"
-        )
+        if workspace_root is None:
+            return "Error: workspace_root is required for 'set' action"
+        return await _context_set(workspace_root)
 
     elif action == "show":
+        return _context_show()
+
+    elif action == "init":
+        # For init, we need context to be set first
         context_set = (
             _workspace_context.get("BEADS_CONTEXT_SET")
             or os.environ.get("BEADS_CONTEXT_SET")
         )
-
         if not context_set:
             return (
-                "Context not set. Call context(action='set', workspace_root='...') first.\n"
-                f"Current process CWD: {os.getcwd()}\n"
-                f"BEADS_WORKING_DIR: {_workspace_context.get('BEADS_WORKING_DIR', 'NOT SET')}\n"
-                f"BEADS_DB: {_workspace_context.get('BEADS_DB') or os.environ.get('BEADS_DB', 'NOT SET')}"
+                "Error: Context must be set before init.\n"
+                "Use context(action='set', workspace_root='/path/to/project') first."
             )
-
-        working_dir = (
-            _workspace_context.get("BEADS_WORKING_DIR")
-            or os.environ.get("BEADS_WORKING_DIR", "NOT SET")
-        )
-        db_path = (
-            _workspace_context.get("BEADS_DB")
-            or os.environ.get("BEADS_DB", "NOT SET")
-        )
-        actor = os.environ.get("BEADS_ACTOR", "NOT SET")
-
-        return (
-            f"Workspace root: {working_dir}\n"
-            f"Database: {db_path}\n"
-            f"Actor: {actor}"
-        )
-
-    elif action == "init":
         return await beads_init(prefix=prefix)
 
     else:
-        raise ValueError(f"Unknown action: {action}. Use 'set', 'show', or 'init'")
+        return f"Error: Unknown action '{action}'. Valid actions: set, show, init"
+
+
+async def _context_set(workspace_root: str) -> str:
+    """Set workspace root directory and discover the beads database."""
+    # Resolve to git repo root if possible (run in thread to avoid blocking event loop)
+    try:
+        resolved_root = await asyncio.wait_for(
+            asyncio.to_thread(_resolve_workspace_root, workspace_root),
+            timeout=5.0,  # Longer timeout to handle slow git operations
+        )
+    except asyncio.TimeoutError:
+        logger.error(f"Git detection timed out after 5s for: {workspace_root}")
+        return (
+            f"Error: Git repository detection timed out.\n"
+            f"  Provided path: {workspace_root}\n"
+            f"  This may indicate a slow filesystem or git configuration issue.\n"
+            f"  Please ensure the path is correct and git is responsive."
+        )
+
+    # Store in persistent context (survives across MCP tool calls)
+    _workspace_context["BEADS_WORKING_DIR"] = resolved_root
+    _workspace_context["BEADS_CONTEXT_SET"] = "1"
+
+    # Also set in os.environ for compatibility
+    os.environ["BEADS_WORKING_DIR"] = resolved_root
+    os.environ["BEADS_CONTEXT_SET"] = "1"
+
+    # Find beads database
+    db_path = _find_beads_db(resolved_root)
+
+    if db_path is None:
+        # Clear any stale DB path
+        _workspace_context.pop("BEADS_DB", None)
+        os.environ.pop("BEADS_DB", None)
+        return (
+            f"Context set successfully:\n"
+            f"  Workspace root: {resolved_root}\n"
+            f"  Database: Not found (run context(action='init') to create)"
+        )
+
+    # Set database path in both persistent context and os.environ
+    _workspace_context["BEADS_DB"] = db_path
+    os.environ["BEADS_DB"] = db_path
+
+    return (
+        f"Context set successfully:\n"
+        f"  Workspace root: {resolved_root}\n"
+        f"  Database: {db_path}"
+    )
+
+
+def _context_show() -> str:
+    """Show current workspace context for debugging."""
+    context_set = (
+        _workspace_context.get("BEADS_CONTEXT_SET")
+        or os.environ.get("BEADS_CONTEXT_SET")
+    )
+
+    if not context_set:
+        return (
+            "Context not set. Use context(action='set', workspace_root='...') first.\n"
+            f"Current process CWD: {os.getcwd()}\n"
+            f"BEADS_WORKING_DIR (persistent): {_workspace_context.get('BEADS_WORKING_DIR', 'NOT SET')}\n"
+            f"BEADS_WORKING_DIR (env): {os.environ.get('BEADS_WORKING_DIR', 'NOT SET')}\n"
+            f"BEADS_DB: {_workspace_context.get('BEADS_DB') or os.environ.get('BEADS_DB', 'NOT SET')}"
+        )
+
+    working_dir = (
+        _workspace_context.get("BEADS_WORKING_DIR")
+        or os.environ.get("BEADS_WORKING_DIR", "NOT SET")
+    )
+    db_path = (
+        _workspace_context.get("BEADS_DB")
+        or os.environ.get("BEADS_DB", "NOT SET")
+    )
+    actor = os.environ.get("BEADS_ACTOR", "NOT SET")
+
+    return (
+        f"Workspace root: {working_dir}\n"
+        f"Database: {db_path}\n"
+        f"Actor: {actor}"
+    )
 
 
 # Register all tools
@@ -643,24 +699,106 @@ def _to_minimal(issue: Issue) -> IssueMinimal:
     )
 
 
+def _to_brief(issue: Issue) -> BriefIssue:
+    """Convert full Issue to brief format (id, title, status, priority)."""
+    return BriefIssue(
+        id=issue.id,
+        title=issue.title,
+        status=issue.status,
+        priority=issue.priority,
+    )
+
+
+def _to_brief_dep(linked: LinkedIssue) -> BriefDep:
+    """Convert LinkedIssue to brief dependency format."""
+    return BriefDep(
+        id=linked.id,
+        title=linked.title,
+        status=linked.status,
+        priority=linked.priority,
+        dependency_type=linked.dependency_type,
+    )
+
+
+# Valid fields for Issue model (used for field validation)
+VALID_ISSUE_FIELDS: set[str] = {
+    "id", "title", "description", "design", "acceptance_criteria", "notes",
+    "external_ref", "status", "priority", "issue_type", "created_at",
+    "updated_at", "closed_at", "assignee", "labels", "dependency_count",
+    "dependent_count", "dependencies", "dependents",
+}
+
+
+def _filter_fields(obj: Issue, fields: list[str]) -> dict[str, Any]:
+    """Extract only specified fields from an Issue object.
+
+    Raises:
+        ValueError: If any requested field is not a valid Issue field.
+    """
+    # Validate fields first
+    requested = set(fields)
+    invalid = requested - VALID_ISSUE_FIELDS
+    if invalid:
+        raise ValueError(
+            f"Invalid field(s): {sorted(invalid)}. "
+            f"Valid fields: {sorted(VALID_ISSUE_FIELDS)}"
+        )
+
+    result: dict[str, Any] = {}
+    for field in fields:
+        value = getattr(obj, field)
+        # Handle nested Pydantic models
+        if hasattr(value, 'model_dump'):
+            result[field] = value.model_dump()
+        elif isinstance(value, list) and value and hasattr(value[0], 'model_dump'):
+            result[field] = [item.model_dump() for item in value]
+        else:
+            result[field] = value
+    return result
+
+
+def _truncate_description(issue: Issue, max_length: int) -> Issue:
+    """Return issue copy with truncated description if needed."""
+    if issue.description and len(issue.description) > max_length:
+        data = issue.model_dump()
+        data['description'] = issue.description[:max_length] + "..."
+        return Issue(**data)
+    return issue
+
+
 @mcp.tool(name="ready", description="Find tasks that have no blockers and are ready to be worked on. Returns minimal format for context efficiency.")
 @with_workspace
 async def ready_work(
     limit: int = 10,
     priority: int | None = None,
     assignee: str | None = None,
-    # Scoping parameters
     labels: list[str] | None = None,
     labels_any: list[str] | None = None,
     unassigned: bool = False,
     sort_policy: str | None = None,
-    # Output control
+    workspace_root: str | None = None,
     brief: bool = False,
     fields: list[str] | None = None,
     max_description_length: int | None = None,
-    workspace_root: str | None = None,
-):
-    """Find issues with no blocking dependencies that are ready to work on."""
+) -> list[IssueMinimal] | list[BriefIssue] | list[dict[str, Any]] | CompactedResult:
+    """Find issues with no blocking dependencies that are ready to work on.
+
+    Args:
+        limit: Maximum issues to return (1-100, default 10)
+        priority: Filter by priority level (0-4)
+        assignee: Filter by assignee
+        labels: Filter by labels (AND: must have ALL specified labels)
+        labels_any: Filter by labels (OR: must have at least one)
+        unassigned: Filter to only unassigned issues
+        sort_policy: Sort policy: hybrid (default), priority, oldest
+        workspace_root: Workspace path override
+        brief: If True, return only {id, title, status} (~97% smaller)
+        fields: Return only specified fields (custom projections)
+        max_description_length: Truncate descriptions to this length
+
+    Returns minimal issue format to reduce context usage by ~80%.
+    Use show(issue_id) for full details including dependencies.
+    """
     issues = await beads_ready_work(
         limit=limit,
         priority=priority,
@@ -671,24 +809,37 @@ async def ready_work(
         sort_policy=sort_policy,
     )
 
-    # Apply output control
-    if brief:
-        return [BriefIssue(id=i.id, title=i.title, status=i.status) for i in issues]
-
-    if fields:
-        return [{k: getattr(i, k, None) for k in fields if hasattr(i, k)} for i in issues]
-
+    # Apply description truncation first
     if max_description_length:
-        for issue in issues:
-            if issue.description and len(issue.description) > max_description_length:
-                issue.description = issue.description[:max_description_length] + "..."
+        issues = [_truncate_description(i, max_description_length) for i in issues]
 
-    return issues
+    # Return brief format if requested
+    if brief:
+        return [_to_brief(issue) for issue in issues]
+
+    # Return specific fields if requested
+    if fields:
+        return [_filter_fields(issue, fields) for issue in issues]
+
+    # Default: minimal format with compaction
+    minimal_issues = [_to_minimal(issue) for issue in issues]
+
+    # Apply compaction if over threshold
+    if len(minimal_issues) > COMPACTION_THRESHOLD:
+        return CompactedResult(
+            compacted=True,
+            total_count=len(minimal_issues),
+            preview=minimal_issues[:PREVIEW_COUNT],
+            preview_count=PREVIEW_COUNT,
+            hint=f"Showing {PREVIEW_COUNT} of {len(minimal_issues)} ready issues. Use show(issue_id) for full details."
+        )
+
+    return minimal_issues
 
 
 @mcp.tool(
     name="list",
-    description="""List all issues with optional filters. When status='blocked', returns BlockedIssue with blocked_by info.""",
+    description="List all issues with optional filters. When status='blocked', returns BlockedIssue with blocked_by info.",
 )
 @with_workspace
 async def list_issues(
@@ -696,121 +847,117 @@ async def list_issues(
     priority: int | None = None,
     issue_type: IssueType | None = None,
     assignee: str | None = None,
-    limit: int = 20,  # Reduced from 50 to avoid MCP buffer overflow
-    # Scoping parameters
     labels: list[str] | None = None,
     labels_any: list[str] | None = None,
     query: str | None = None,
     unassigned: bool = False,
-    # Output control
+    limit: int = 20,
+    workspace_root: str | None = None,
     brief: bool = False,
     fields: list[str] | None = None,
     max_description_length: int | None = None,
-    workspace_root: str | None = None,
-):
-    """List all issues with optional filters."""
+) -> list[IssueMinimal] | list[BriefIssue] | list[dict[str, Any]] | CompactedResult:
+    """List all issues with optional filters.
 
+    Args:
+        status: Filter by status (open, in_progress, blocked, closed)
+        priority: Filter by priority level (0-4)
+        issue_type: Filter by type (bug, feature, task, epic, chore)
+        assignee: Filter by assignee
+        labels: Filter by labels (AND: must have ALL specified labels)
+        labels_any: Filter by labels (OR: must have at least one)
+        query: Search in title (case-insensitive substring)
+        unassigned: Filter to only unassigned issues
+        limit: Maximum issues to return (1-100, default 20)
+        workspace_root: Workspace path override
+        brief: If True, return only {id, title, status} (~97% smaller)
+        fields: Return only specified fields (custom projections)
+        max_description_length: Truncate descriptions to this length
+
+    Returns minimal issue format to reduce context usage by ~80%.
+    Use show(issue_id) for full details including dependencies.
+    """
     issues = await beads_list_issues(
         status=status,
         priority=priority,
         issue_type=issue_type,
         assignee=assignee,
-        limit=limit,
         labels=labels,
         labels_any=labels_any,
         query=query,
         unassigned=unassigned,
+        limit=limit,
     )
 
-    # Strip dependencies/dependents to reduce payload size
-    # Use show() for full details
-    for issue in issues:
-        issue.dependencies = []
-        issue.dependents = []
-
-    # Apply output control
-    if brief:
-        return [BriefIssue(id=i.id, title=i.title, status=i.status) for i in issues]
-
-    if fields:
-        return [{k: getattr(i, k, None) for k in fields if hasattr(i, k)} for i in issues]
-
+    # Apply description truncation first
     if max_description_length:
-        for issue in issues:
-            if issue.description and len(issue.description) > max_description_length:
-                issue.description = issue.description[:max_description_length] + "..."
+        issues = [_truncate_description(i, max_description_length) for i in issues]
 
-    return issues
+    # Return brief format if requested
+    if brief:
+        return [_to_brief(issue) for issue in issues]
+
+    # Return specific fields if requested
+    if fields:
+        return [_filter_fields(issue, fields) for issue in issues]
+
+    # Default: minimal format with compaction
+    minimal_issues = [_to_minimal(issue) for issue in issues]
+
+    # Apply compaction if over threshold
+    if len(minimal_issues) > COMPACTION_THRESHOLD:
+        return CompactedResult(
+            compacted=True,
+            total_count=len(minimal_issues),
+            preview=minimal_issues[:PREVIEW_COUNT],
+            preview_count=PREVIEW_COUNT,
+            hint=f"Showing {PREVIEW_COUNT} of {len(minimal_issues)} issues. Use show(issue_id) for full details or add filters to narrow results."
+        )
+
+    return minimal_issues
 
 
 @mcp.tool(
     name="show",
-    description="""Show detailed information about a specific issue including dependencies and dependents.
-
-Output modes:
-- Default: Full issue with full dependency objects
-- brief=True: Just {id, title, status}
-- brief_deps=True: Full issue but deps as {id, title, status, dependency_type}
-- fields=["id", "dependencies"]: Only specified fields""",
+    description="Show detailed information about a specific issue including dependencies and dependents.",
 )
 @with_workspace
 async def show_issue(
     issue_id: str,
-    # Output control
+    workspace_root: str | None = None,
     brief: bool = False,
-    brief_deps: bool = False,  # True=deps as {id,title,status,dep_type}, False=full Issue objects
+    brief_deps: bool = False,
     fields: list[str] | None = None,
     max_description_length: int | None = None,
-    workspace_root: str | None = None,
-):
-    """Show detailed information about a specific issue."""
+) -> Issue | BriefIssue | dict[str, Any]:
+    """Show detailed information about a specific issue.
+
+    Args:
+        issue_id: The issue ID to show (e.g., 'bd-a1b2')
+        workspace_root: Workspace path override
+        brief: If True, return only {id, title, status, priority}
+        brief_deps: If True, return full issue but with compact dependencies
+        fields: Return only specified fields (custom projections)
+        max_description_length: Truncate description to this length
+    """
     issue = await beads_show_issue(issue_id=issue_id)
 
-    # Apply output control
+    if max_description_length:
+        issue = _truncate_description(issue, max_description_length)
+
+    # Brief mode - just identification
     if brief:
-        return BriefIssue(id=issue.id, title=issue.title, status=issue.status)
+        return _to_brief(issue)
+
+    # Brief deps mode - full issue but compact dependencies
+    if brief_deps:
+        data = issue.model_dump()
+        data["dependencies"] = [_to_brief_dep(d).model_dump() for d in issue.dependencies]
+        data["dependents"] = [_to_brief_dep(d).model_dump() for d in issue.dependents]
+        return data
 
     if fields:
-        result = {k: getattr(issue, k, None) for k in fields if hasattr(issue, k)}
-        # Apply brief_deps to fields output if dependencies/dependents requested
-        if brief_deps:
-            if "dependencies" in result and result["dependencies"]:
-                result["dependencies"] = [
-                    BriefDep(
-                        id=d.id, title=d.title, status=d.status,
-                        dependency_type=getattr(d, "dependency_type", None)
-                    ) for d in result["dependencies"]
-                ]
-            if "dependents" in result and result["dependents"]:
-                result["dependents"] = [
-                    BriefDep(
-                        id=d.id, title=d.title, status=d.status,
-                        dependency_type=getattr(d, "dependency_type", None)
-                    ) for d in result["dependents"]
-                ]
-        return result
-
-    if max_description_length:
-        if issue.description and len(issue.description) > max_description_length:
-            issue.description = issue.description[:max_description_length] + "..."
-
-    # Convert deps to brief format if requested
-    if brief_deps:
-        # Convert to dict so we can modify deps
-        issue_dict = issue.model_dump()
-        if issue_dict.get("dependencies"):
-            issue_dict["dependencies"] = [
-                {"id": d["id"], "title": d["title"], "status": d["status"],
-                 "dependency_type": d.get("dependency_type")}
-                for d in issue_dict["dependencies"]
-            ]
-        if issue_dict.get("dependents"):
-            issue_dict["dependents"] = [
-                {"id": d["id"], "title": d["title"], "status": d["status"],
-                 "dependency_type": d.get("dependency_type")}
-                for d in issue_dict["dependents"]
-            ]
-        return issue_dict
+        return _filter_fields(issue, fields)
 
     return issue
 
@@ -818,7 +965,7 @@ async def show_issue(
 @mcp.tool(
     name="create",
     description="""Create a new issue (bug, feature, task, epic, or chore) with optional design,
-acceptance criteria, and dependencies. Returns brief confirmation by default; use verbose=True for full Issue.""",
+acceptance criteria, and dependencies.""",
 )
 @with_workspace
 @require_context
@@ -834,10 +981,14 @@ async def create_issue(
     labels: list[str] | None = None,
     id: str | None = None,
     deps: list[str] | None = None,
-    verbose: bool = False,
     workspace_root: str | None = None,
-):
-    """Create a new issue."""
+    brief: bool = True,
+) -> Issue | OperationResult:
+    """Create a new issue.
+
+    Args:
+        brief: If True (default), return minimal OperationResult; if False, return full Issue
+    """
     issue = await beads_create_issue(
         title=title,
         description=description,
@@ -851,16 +1002,16 @@ async def create_issue(
         id=id,
         deps=deps,
     )
-    if verbose:
-        return issue
-    return OperationResult(id=issue.id, action="created")
+
+    if brief:
+        return OperationResult(id=issue.id, action="created")
+    return issue
 
 
 @mcp.tool(
     name="update",
     description="""Update an existing issue's status, priority, assignee, description, design notes,
-acceptance criteria, labels, or time estimate. Use this to claim work (set status=in_progress).
-Returns brief confirmation by default; use verbose=True for full Issue.""",
+or acceptance criteria. Use this to claim work (set status=in_progress).""",
 )
 @with_workspace
 @require_context
@@ -875,22 +1026,22 @@ async def update_issue(
     acceptance_criteria: str | None = None,
     notes: str | None = None,
     external_ref: str | None = None,
-    # Label operations
-    add_labels: list[str] | None = None,
-    remove_labels: list[str] | None = None,
-    # Time estimate
-    estimated_minutes: int | None = None,
-    # Output control
-    verbose: bool = False,
     workspace_root: str | None = None,
-):
-    """Update an existing issue."""
+    brief: bool = True,
+) -> Issue | OperationResult | list[Issue] | list[OperationResult] | None:
+    """Update an existing issue.
+
+    Args:
+        brief: If True (default), return minimal OperationResult; if False, return full Issue
+    """
     # If trying to close via update, redirect to close_issue to preserve approval workflow
     if status == "closed":
         issues = await beads_close_issue(issue_id=issue_id, reason="Closed via update")
-        if not verbose:
-            return OperationResult(id=issue_id, action="closed")
-        return issues[0] if issues else None
+        if not issues:
+            return None
+        if brief:
+            return OperationResult(id=issues[0].id, action="closed", message="Closed via update")
+        return issues[0]
 
     issue = await beads_update_issue(
         issue_id=issue_id,
@@ -903,192 +1054,83 @@ async def update_issue(
         acceptance_criteria=acceptance_criteria,
         notes=notes,
         external_ref=external_ref,
-        add_labels=add_labels,
-        remove_labels=remove_labels,
-        estimated_minutes=estimated_minutes,
     )
-    if verbose:
-        return issue
-    return OperationResult(id=issue_id, action="updated")
+
+    if issue is None:
+        return None
+    if brief:
+        return OperationResult(id=issue.id, action="updated")
+    return issue
 
 
 @mcp.tool(
     name="close",
-    description="""Close or reopen issues.
-- action="close" (default): Mark issue complete. Use suggest_next=True to see unblocked issues.
-- action="reopen": Reopen closed issues (use issue_ids for multiple).
-Returns brief confirmation by default; use verbose=True for full Issue.""",
+    description="Close (complete) an issue. Mark work as done when you've finished implementing/fixing it.",
 )
 @with_workspace
 @require_context
 async def close_issue(
-    issue_id: str | None = None,
-    issue_ids: list[str] | None = None,
-    action: str = "close",  # "close" or "reopen"
+    issue_id: str,
     reason: str = "Completed",
-    verbose: bool = False,
-    suggest_next: bool = False,
     workspace_root: str | None = None,
-):
-    """Close or reopen issues."""
+    brief: bool = True,
+) -> list[Issue] | list[OperationResult]:
+    """Close (complete) an issue.
 
-    # Handle reopen action
-    if action == "reopen":
-        ids_to_reopen = issue_ids or ([issue_id] if issue_id else [])
-        if not ids_to_reopen:
-            raise ValueError("issue_id or issue_ids required for reopen action")
-        issues = await beads_reopen_issue(issue_ids=ids_to_reopen, reason=reason if reason != "Completed" else None)
-        if verbose:
-            return issues
-        ids_str = ", ".join(ids_to_reopen)
-        return OperationResult(id=ids_str, action="reopened", message=f"{len(issues)} issue(s)")
-
-    # Handle close action (default)
-    if not issue_id:
-        raise ValueError("issue_id required for close action")
-
-    # Get dependents BEFORE closing if suggest_next requested
-    dependents = []
-    if suggest_next:
-        issue = await beads_show_issue(issue_id=issue_id)
-        dependents = issue.dependents
-
-    # Close the issue
+    Args:
+        brief: If True (default), return minimal OperationResult list; if False, return full Issues
+    """
     issues = await beads_close_issue(issue_id=issue_id, reason=reason)
 
-    if verbose:
+    if not brief:
         return issues
 
-    result = OperationResult(id=issue_id, action="closed")
+    return [OperationResult(id=issue_id, action="closed", message=reason)]
 
-    # Check which dependents are now unblocked
-    if suggest_next and dependents:
-        unblocked = []
-        for dep in dependents:
-            if dep.dependency_type == "blocks":
-                # Get fresh state of dependent
-                dep_issue = await beads_show_issue(issue_id=dep.id)
-                # Check if all its blockers are now closed
-                all_blockers_closed = all(
-                    d.status == "closed"
-                    for d in dep_issue.dependencies
-                    if d.dependency_type == "blocks"
-                )
-                if all_blockers_closed and dep_issue.status == "open":
-                    unblocked.append({"id": dep.id, "title": dep.title})
 
-        if unblocked:
-            result.message = f"Unblocked: {unblocked}"
+@mcp.tool(
+    name="reopen",
+    description="Reopen one or more closed issues. Sets status to 'open' and clears closed_at timestamp.",
+)
+@with_workspace
+@require_context
+async def reopen_issue(
+    issue_ids: list[str],
+    reason: str | None = None,
+    workspace_root: str | None = None,
+    brief: bool = True,
+) -> list[Issue] | list[OperationResult]:
+    """Reopen one or more closed issues.
 
-    return result
+    Args:
+        brief: If True (default), return minimal OperationResult list; if False, return full Issues
+    """
+    issues = await beads_reopen_issue(issue_ids=issue_ids, reason=reason)
+
+    if brief:
+        return [OperationResult(id=i.id, action="reopened", message=reason) for i in issues]
+    return issues
 
 
 @mcp.tool(
     name="dep",
-    description="""Manage dependencies between issues.
-Actions:
-- add: Create dependency (issue depends on depends_on). Types: blocks, related, parent-child, discovered-from
-- remove: Remove dependency
-- tree: Show dependency tree (use brief=True for minimal output, reverse=True for children)
-
-Examples:
-- dep(action="add", issue_id="bd-1", depends_on_id="bd-2")
-- dep(action="tree", issue_id="bd-1", brief=True)""",
+    description="""Add a dependency between issues. Types: blocks (hard blocker),
+related (soft link), parent-child (epic/subtask), discovered-from (found during work).""",
 )
 @with_workspace
-async def dep(
-    action: str,  # "add", "remove", "tree"
+@require_context
+async def add_dependency(
     issue_id: str,
-    depends_on_id: str | None = None,
+    depends_on_id: str,
     dep_type: DependencyType = "blocks",
-    max_depth: int = 3,
-    reverse: bool = True,  # True=show dependents (children), False=show dependencies (blockers)
-    brief: bool = False,
-    verbose: bool = False,
     workspace_root: str | None = None,
-):
-    """Manage dependencies between issues."""
-
-    if action == "add":
-        if not depends_on_id:
-            raise ValueError("depends_on_id required for add action")
-        result = await beads_add_dependency(
-            issue_id=issue_id,
-            depends_on_id=depends_on_id,
-            dep_type=dep_type,
-        )
-        if verbose:
-            return result
-        return OperationResult(id=f"{issue_id}->{depends_on_id}", action="dep_added")
-
-    elif action == "remove":
-        if not depends_on_id:
-            raise ValueError("depends_on_id required for remove action")
-        result = await beads_remove_dependency(
-            issue_id=issue_id,
-            depends_on_id=depends_on_id,
-            dep_type=dep_type if dep_type != "blocks" else None,
-        )
-        if verbose:
-            return result
-        return OperationResult(id=f"{issue_id}->{depends_on_id}", action="dep_removed")
-
-    elif action == "tree":
-        result = await beads_dep_tree(
-            issue_id=issue_id,
-            max_depth=max_depth,
-            reverse=reverse,
-        )
-        if brief:
-            # Convert to minimal format
-            nodes = result.get("nodes", [])
-            return [
-                BriefTreeNode(
-                    id=n["id"],
-                    title=n["title"],
-                    status=n["status"],
-                    depth=n.get("depth", 0),
-                    truncated=n.get("truncated", False),
-                )
-                for n in nodes
-            ]
-        return result
-
-    else:
-        raise ValueError(f"Unknown action: {action}. Use 'add', 'remove', or 'tree'")
-
-
-@mcp.tool(
-    name="comment",
-    description="""Manage comments on issues.
-Actions:
-- add: Add a comment (requires text parameter)
-- list: List all comments on an issue""",
-)
-@with_workspace
-async def comment(
-    action: str,  # "add" or "list"
-    issue_id: str,
-    text: str | None = None,
-    author: str | None = None,
-    verbose: bool = False,
-    workspace_root: str | None = None,
-):
-    """Manage comments on issues."""
-
-    if action == "add":
-        if not text:
-            raise ValueError("text required for add action")
-        result = await beads_comment_add(issue_id=issue_id, text=text, author=author)
-        if verbose:
-            return result
-        return OperationResult(id=issue_id, action="comment_added")
-
-    elif action == "list":
-        return await beads_comment_list(issue_id=issue_id)
-
-    else:
-        raise ValueError(f"Unknown action: {action}. Use 'add' or 'list'")
+) -> str:
+    """Add a dependency relationship between two issues."""
+    return await beads_add_dependency(
+        issue_id=issue_id,
+        depends_on_id=depends_on_id,
+        dep_type=dep_type,
+    )
 
 
 @mcp.tool(
@@ -1096,9 +1138,44 @@ async def comment(
     description="Get statistics: total issues, open, in_progress, closed, blocked, ready, and average lead time.",
 )
 @with_workspace
-async def stats(workspace_root: str | None = None):
+async def stats(workspace_root: str | None = None) -> Stats:
     """Get statistics about tasks."""
     return await beads_stats()
+
+
+@mcp.tool(
+    name="blocked",
+    description="Get blocked issues showing what dependencies are blocking them from being worked on.",
+)
+@with_workspace
+async def blocked(
+    workspace_root: str | None = None,
+    brief: bool = False,
+    brief_deps: bool = False,
+) -> list[BlockedIssue] | list[BriefIssue] | list[dict[str, Any]]:
+    """Get blocked issues.
+
+    Args:
+        brief: If True, return only {id, title, status, priority} per issue
+        brief_deps: If True, return full issues but with compact dependencies
+    """
+    issues = await beads_blocked()
+
+    # Brief mode - just identification (most compact)
+    if brief:
+        return [_to_brief(issue) for issue in issues]
+
+    # Brief deps mode - full issue but compact dependencies
+    if brief_deps:
+        result = []
+        for issue in issues:
+            data = issue.model_dump()
+            data["dependencies"] = [_to_brief_dep(d).model_dump() for d in issue.dependencies]
+            data["dependents"] = [_to_brief_dep(d).model_dump() for d in issue.dependents]
+            result.append(data)
+        return result
+
+    return issues
 
 
 @mcp.tool(
@@ -1120,7 +1197,7 @@ async def admin(
     fix: bool = False,
     clean: bool = False,
     workspace_root: str | None = None,
-):
+) -> dict[str, Any] | str:
     """Administrative and diagnostic operations."""
 
     if action == "validate":

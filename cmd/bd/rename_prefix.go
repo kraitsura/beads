@@ -1,27 +1,29 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
-	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
 )
 
 var renamePrefixCmd = &cobra.Command{
-	Use:   "rename-prefix <new-prefix>",
-	Short: "Rename the issue prefix for all issues in the database",
+	Use:     "rename-prefix <new-prefix>",
+	GroupID: GroupMaintenance,
+	Short:   "Rename the issue prefix for all issues in the database",
 	Long: `Rename the issue prefix for all issues in the database.
 This will update all issue IDs and all text references across all fields.
 
@@ -99,12 +101,10 @@ NOTE: This is a rare operation. Most users never need this command.`,
 
 		if len(prefixes) > 1 {
 			// Multiple prefixes detected - requires repair mode
-			red := color.New(color.FgRed).SprintFunc()
-			yellow := color.New(color.FgYellow).SprintFunc()
 
-			fmt.Fprintf(os.Stderr, "%s Multiple prefixes detected in database:\n", red("✗"))
+			fmt.Fprintf(os.Stderr, "%s Multiple prefixes detected in database:\n", ui.RenderFail("✗"))
 			for prefix, count := range prefixes {
-				fmt.Fprintf(os.Stderr, "  - %s: %d issues\n", yellow(prefix), count)
+				fmt.Fprintf(os.Stderr, "  - %s: %d issues\n", ui.RenderWarn(prefix), count)
 			}
 			fmt.Fprintf(os.Stderr, "\n")
 
@@ -141,8 +141,7 @@ NOTE: This is a rare operation. Most users never need this command.`,
 		}
 
 		if dryRun {
-			cyan := color.New(color.FgCyan).SprintFunc()
-			fmt.Printf("DRY RUN: Would rename %d issues from prefix '%s' to '%s'\n\n", len(issues), oldPrefix, newPrefix)
+				fmt.Printf("DRY RUN: Would rename %d issues from prefix '%s' to '%s'\n\n", len(issues), oldPrefix, newPrefix)
 			fmt.Printf("Sample changes:\n")
 			for i, issue := range issues {
 				if i >= 5 {
@@ -151,13 +150,11 @@ NOTE: This is a rare operation. Most users never need this command.`,
 				}
 				oldID := fmt.Sprintf("%s-%s", oldPrefix, strings.TrimPrefix(issue.ID, oldPrefix+"-"))
 				newID := fmt.Sprintf("%s-%s", newPrefix, strings.TrimPrefix(issue.ID, oldPrefix+"-"))
-				fmt.Printf("  %s -> %s\n", cyan(oldID), cyan(newID))
+				fmt.Printf("  %s -> %s\n", ui.RenderAccent(oldID), ui.RenderAccent(newID))
 			}
 			return
 		}
 
-		green := color.New(color.FgGreen).SprintFunc()
-		cyan := color.New(color.FgCyan).SprintFunc()
 
 		fmt.Printf("Renaming %d issues from prefix '%s' to '%s'...\n", len(issues), oldPrefix, newPrefix)
 
@@ -169,7 +166,7 @@ NOTE: This is a rare operation. Most users never need this command.`,
 		// Schedule full export (IDs changed, incremental won't work)
 		markDirtyAndScheduleFullExport()
 
-		fmt.Printf("%s Successfully renamed prefix from %s to %s\n", green("✓"), cyan(oldPrefix), cyan(newPrefix))
+		fmt.Printf("%s Successfully renamed prefix from %s to %s\n", ui.RenderPass("✓"), ui.RenderAccent(oldPrefix), ui.RenderAccent(newPrefix))
 
 		if jsonOutput {
 			result := map[string]interface{}{
@@ -230,9 +227,6 @@ type issueSort struct {
 // Issues with the correct prefix are left unchanged.
 // Issues with incorrect prefixes get new hash-based IDs.
 func repairPrefixes(ctx context.Context, st storage.Storage, actorName string, targetPrefix string, issues []*types.Issue, prefixes map[string]int, dryRun bool) error {
-	green := color.New(color.FgGreen).SprintFunc()
-	cyan := color.New(color.FgCyan).SprintFunc()
-	yellow := color.New(color.FgYellow).SprintFunc()
 
 	// Separate issues into correct and incorrect prefix groups
 	var correctIssues []*types.Issue
@@ -254,11 +248,11 @@ func repairPrefixes(ctx context.Context, st storage.Storage, actorName string, t
 	}
 
 	// Sort incorrect issues: first by prefix lexicographically, then by number
-	sort.Slice(incorrectIssues, func(i, j int) bool {
-		if incorrectIssues[i].prefix != incorrectIssues[j].prefix {
-			return incorrectIssues[i].prefix < incorrectIssues[j].prefix
-		}
-		return incorrectIssues[i].number < incorrectIssues[j].number
+	slices.SortFunc(incorrectIssues, func(a, b issueSort) int {
+		return cmp.Or(
+			cmp.Compare(a.prefix, b.prefix),
+			cmp.Compare(a.number, b.number),
+		)
 	})
 
 	// Get a database connection for ID generation
@@ -290,7 +284,7 @@ func repairPrefixes(ctx context.Context, st storage.Storage, actorName string, t
 
 	if dryRun {
 		fmt.Printf("DRY RUN: Would repair %d issues with incorrect prefixes\n\n", len(incorrectIssues))
-		fmt.Printf("Issues with correct prefix (%s): %d\n", cyan(targetPrefix), len(correctIssues))
+		fmt.Printf("Issues with correct prefix (%s): %d\n", ui.RenderAccent(targetPrefix), len(correctIssues))
 		fmt.Printf("Issues to repair: %d\n\n", len(incorrectIssues))
 
 		fmt.Printf("Planned renames (showing first 10):\n")
@@ -301,14 +295,14 @@ func repairPrefixes(ctx context.Context, st storage.Storage, actorName string, t
 			}
 			oldID := is.issue.ID
 			newID := renameMap[oldID]
-			fmt.Printf("  %s -> %s\n", yellow(oldID), cyan(newID))
+			fmt.Printf("  %s -> %s\n", ui.RenderWarn(oldID), ui.RenderAccent(newID))
 		}
 		return nil
 	}
 
 	// Perform the repairs
 	fmt.Printf("Repairing database with multiple prefixes...\n")
-	fmt.Printf("  Issues with correct prefix (%s): %d\n", cyan(targetPrefix), len(correctIssues))
+	fmt.Printf("  Issues with correct prefix (%s): %d\n", ui.RenderAccent(targetPrefix), len(correctIssues))
 	fmt.Printf("  Issues to repair: %d\n\n", len(incorrectIssues))
 
 	// Pattern to match any issue ID reference in text (both hash and sequential IDs)
@@ -348,7 +342,7 @@ func repairPrefixes(ctx context.Context, st storage.Storage, actorName string, t
 			return fmt.Errorf("failed to update issue %s -> %s: %w", oldID, newID, err)
 		}
 
-		fmt.Printf("  Renamed %s -> %s\n", yellow(oldID), cyan(newID))
+		fmt.Printf("  Renamed %s -> %s\n", ui.RenderWarn(oldID), ui.RenderAccent(newID))
 	}
 
 	// Update all dependencies to use new prefix
@@ -378,7 +372,7 @@ func repairPrefixes(ctx context.Context, st storage.Storage, actorName string, t
 	markDirtyAndScheduleFullExport()
 
 	fmt.Printf("\n%s Successfully consolidated %d prefixes into %s\n",
-		green("✓"), len(prefixes), cyan(targetPrefix))
+		ui.RenderPass("✓"), len(prefixes), ui.RenderAccent(targetPrefix))
 	fmt.Printf("  %d issues repaired, %d issues unchanged\n", len(incorrectIssues), len(correctIssues))
 
 	if jsonOutput {

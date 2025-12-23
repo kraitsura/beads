@@ -19,18 +19,14 @@ from .models import (
     AddDependencyParams,
     BlockedIssue,
     CloseIssueParams,
-    CommentAddParams,
-    CommentListParams,
     CreateIssueParams,
     DependencyType,
-    DepTreeParams,
     InitParams,
     Issue,
     IssueStatus,
     IssueType,
     ListIssuesParams,
     ReadyWorkParams,
-    RemoveDependencyParams,
     ReopenIssueParams,
     ShowIssueParams,
     Stats,
@@ -259,7 +255,7 @@ async def _get_client() -> BdClientBase:
     if not workspace:
         raise BdError(
             "No beads workspace found. Either:\n"
-            "  1. Call set_context(workspace_root=\"/path/to/project\"), OR\n"
+            "  1. Call context(workspace_root=\"/path/to/project\"), OR\n"
             "  2. Run from a directory containing .beads/, OR\n"
             "  3. Set BEADS_WORKING_DIR environment variable"
         )
@@ -309,11 +305,10 @@ async def beads_ready_work(
     limit: Annotated[int, "Maximum number of issues to return (1-100)"] = 10,
     priority: Annotated[int | None, "Filter by priority (0-4, 0=highest)"] = None,
     assignee: Annotated[str | None, "Filter by assignee"] = None,
-    # Scoping parameters
     labels: Annotated[list[str] | None, "Filter by labels (AND: must have ALL)"] = None,
     labels_any: Annotated[list[str] | None, "Filter by labels (OR: must have at least one)"] = None,
-    unassigned: Annotated[bool, "Filter for unassigned issues only"] = False,
-    sort_policy: Annotated[str | None, "Sort policy: hybrid, priority, or oldest"] = None,
+    unassigned: Annotated[bool, "Filter to only unassigned issues"] = False,
+    sort_policy: Annotated[str | None, "Sort policy: hybrid (default), priority, oldest"] = None,
 ) -> list[Issue]:
     """Find issues with no blocking dependencies that are ready to work on.
 
@@ -325,8 +320,8 @@ async def beads_ready_work(
         limit=limit,
         priority=priority,
         assignee=assignee,
-        labels=labels or [],
-        labels_any=labels_any or [],
+        labels=labels,
+        labels_any=labels_any,
         unassigned=unassigned,
         sort_policy=sort_policy,
     )
@@ -334,16 +329,15 @@ async def beads_ready_work(
 
 
 async def beads_list_issues(
-    status: Annotated[IssueStatus | None, "Filter by status (open, in_progress, blocked, closed)"] = None,
+    status: Annotated[IssueStatus | None, "Filter by status (open, in_progress, blocked, deferred, closed)"] = None,
     priority: Annotated[int | None, "Filter by priority (0-4, 0=highest)"] = None,
     issue_type: Annotated[IssueType | None, "Filter by type (bug, feature, task, epic, chore)"] = None,
     assignee: Annotated[str | None, "Filter by assignee"] = None,
-    limit: Annotated[int, "Maximum number of issues to return (1-1000)"] = 50,
-    # Scoping parameters
     labels: Annotated[list[str] | None, "Filter by labels (AND: must have ALL)"] = None,
     labels_any: Annotated[list[str] | None, "Filter by labels (OR: must have at least one)"] = None,
-    query: Annotated[str | None, "Free-form search on title/description/id"] = None,
-    unassigned: Annotated[bool, "Filter for unassigned issues only"] = False,
+    query: Annotated[str | None, "Search in title (case-insensitive substring)"] = None,
+    unassigned: Annotated[bool, "Filter to only unassigned issues"] = False,
+    limit: Annotated[int, "Maximum number of issues to return (1-100)"] = 20,
 ) -> list[Issue]:
     """List all issues with optional filters."""
     client = await _get_client()
@@ -353,11 +347,11 @@ async def beads_list_issues(
         priority=priority,
         issue_type=issue_type,
         assignee=assignee,
-        limit=limit,
-        labels=labels or [],
-        labels_any=labels_any or [],
+        labels=labels,
+        labels_any=labels_any,
         query=query,
         unassigned=unassigned,
+        limit=limit,
     )
     return await client.list_issues(params)
 
@@ -418,7 +412,7 @@ async def beads_create_issue(
 
 async def beads_update_issue(
     issue_id: Annotated[str, "Issue ID (e.g., bd-1)"],
-    status: Annotated[IssueStatus | None, "New status (open, in_progress, blocked, closed)"] = None,
+    status: Annotated[IssueStatus | None, "New status (open, in_progress, blocked, deferred, closed)"] = None,
     priority: Annotated[int | None, "New priority (0-4)"] = None,
     assignee: Annotated[str | None, "New assignee"] = None,
     title: Annotated[str | None, "New title"] = None,
@@ -427,16 +421,11 @@ async def beads_update_issue(
     acceptance_criteria: Annotated[str | None, "Acceptance criteria"] = None,
     notes: Annotated[str | None, "Additional notes"] = None,
     external_ref: Annotated[str | None, "External reference (e.g., gh-9, jira-ABC)"] = None,
-    # Label operations
-    add_labels: Annotated[list[str] | None, "Labels to add (without removing existing)"] = None,
-    remove_labels: Annotated[list[str] | None, "Labels to remove"] = None,
-    # Time estimate
-    estimated_minutes: Annotated[int | None, "Time estimate in minutes"] = None,
 ) -> Issue | list[Issue]:
     """Update an existing issue.
 
     Claim work by setting status to 'in_progress'.
-
+    
     Note: Setting status to 'closed' or 'open' will automatically route to
     beads_close_issue() or beads_reopen_issue() respectively to ensure
     proper approval workflows are followed.
@@ -446,12 +435,12 @@ async def beads_update_issue(
         # Route to close tool to respect approval workflows
         reason = notes if notes else "Completed"
         return await beads_close_issue(issue_id=issue_id, reason=reason)
-
+    
     if status == "open":
         # Route to reopen tool to respect approval workflows
         reason = notes if notes else "Reopened"
         return await beads_reopen_issue(issue_ids=[issue_id], reason=reason)
-
+    
     # Normal attribute updates proceed as usual
     client = await _get_client()
     params = UpdateIssueParams(
@@ -465,9 +454,6 @@ async def beads_update_issue(
         acceptance_criteria=acceptance_criteria,
         notes=notes,
         external_ref=external_ref,
-        add_labels=add_labels or [],
-        remove_labels=remove_labels or [],
-        estimated_minutes=estimated_minutes,
     )
     return await client.update(params)
 
@@ -528,71 +514,6 @@ async def beads_add_dependency(
         return f"Added dependency: {issue_id} depends on {depends_on_id} ({dep_type})"
     except BdError as e:
         return f"Error: {str(e)}"
-
-
-async def beads_remove_dependency(
-    issue_id: Annotated[str, "Issue that has the dependency (e.g., bd-2)"],
-    depends_on_id: Annotated[str, "Issue to remove from dependencies (e.g., bd-1)"],
-    dep_type: Annotated[DependencyType | None, "Specific dependency type to remove (optional)"] = None,
-) -> str:
-    """Remove a dependency relationship between two issues.
-
-    If dep_type is not specified, removes any dependency between the two issues.
-    """
-    client = await _get_client()
-    params = RemoveDependencyParams(
-        issue_id=issue_id,
-        depends_on_id=depends_on_id,
-        dep_type=dep_type,
-    )
-    try:
-        await client.remove_dependency(params)
-        type_str = f" ({dep_type})" if dep_type else ""
-        return f"Removed dependency: {issue_id} no longer depends on {depends_on_id}{type_str}"
-    except BdError as e:
-        return f"Error: {str(e)}"
-
-
-async def beads_dep_tree(
-    issue_id: Annotated[str, "Issue ID to get dependency tree for"],
-    max_depth: Annotated[int, "Maximum depth to traverse (1-10)"] = 3,
-    reverse: Annotated[bool, "True=show dependents (children), False=show dependencies (blockers)"] = True,
-) -> dict[str, Any]:
-    """Get the dependency tree for an issue.
-
-    By default (reverse=True), shows what depends on this issue (children/dependents).
-    With reverse=False, shows what this issue depends on (blockers).
-    Useful for understanding blocking chains and work hierarchies.
-    """
-    client = await _get_client()
-    params = DepTreeParams(issue_id=issue_id, max_depth=max_depth, reverse=reverse)
-    return await client.dep_tree(params)
-
-
-async def beads_comment_add(
-    issue_id: Annotated[str, "Issue ID to add comment to"],
-    text: Annotated[str, "Comment text"],
-    author: Annotated[str | None, "Author name (defaults to BEADS_ACTOR)"] = None,
-) -> dict[str, Any]:
-    """Add a comment to an issue.
-
-    Comments are useful for tracking progress, decisions, or notes.
-    """
-    client = await _get_client()
-    params = CommentAddParams(issue_id=issue_id, text=text, author=author)
-    return await client.comment_add(params)
-
-
-async def beads_comment_list(
-    issue_id: Annotated[str, "Issue ID to list comments for"],
-) -> list[dict[str, Any]]:
-    """List all comments on an issue.
-
-    Returns comments in chronological order.
-    """
-    client = await _get_client()
-    params = CommentListParams(issue_id=issue_id)
-    return await client.comment_list(params)
 
 
 async def beads_quickstart() -> str:

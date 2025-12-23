@@ -225,6 +225,17 @@ func (s *Server) handleRequest(req *Request) Response {
 		resp = s.handleGetMutations(req)
 	case OpShutdown:
 		resp = s.handleShutdown(req)
+	// Gate operations (bd-likt)
+	case OpGateCreate:
+		resp = s.handleGateCreate(req)
+	case OpGateList:
+		resp = s.handleGateList(req)
+	case OpGateShow:
+		resp = s.handleGateShow(req)
+	case OpGateClose:
+		resp = s.handleGateClose(req)
+	case OpGateWait:
+		resp = s.handleGateWait(req)
 	default:
 		s.metrics.RecordError(req.Operation)
 		return Response{
@@ -284,6 +295,7 @@ func (s *Server) handleStatus(_ *Request) Response {
 	s.mu.RLock()
 	autoCommit := s.autoCommit
 	autoPush := s.autoPush
+	autoPull := s.autoPull
 	localMode := s.localMode
 	syncInterval := s.syncInterval
 	daemonMode := s.daemonMode
@@ -301,6 +313,7 @@ func (s *Server) handleStatus(_ *Request) Response {
 		ExclusiveLockHolder: lockHolder,
 		AutoCommit:          autoCommit,
 		AutoPush:            autoPush,
+		AutoPull:            autoPull,
 		LocalMode:           localMode,
 		SyncInterval:        syncInterval,
 		DaemonMode:          daemonMode,

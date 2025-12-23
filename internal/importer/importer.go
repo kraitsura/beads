@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/linear"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
@@ -29,12 +31,12 @@ const (
 
 // Options contains import configuration
 type Options struct {
-	DryRun                     bool           // Preview changes without applying them
-	SkipUpdate                 bool           // Skip updating existing issues (create-only mode)
-	Strict                     bool           // Fail on any error (dependencies, labels, etc.)
-	RenameOnImport             bool           // Rename imported issues to match database prefix
-	SkipPrefixValidation       bool           // Skip prefix validation (for auto-import)
-	OrphanHandling             OrphanHandling // How to handle missing parent issues (default: allow)
+	DryRun                     bool            // Preview changes without applying them
+	SkipUpdate                 bool            // Skip updating existing issues (create-only mode)
+	Strict                     bool            // Fail on any error (dependencies, labels, etc.)
+	RenameOnImport             bool            // Rename imported issues to match database prefix
+	SkipPrefixValidation       bool            // Skip prefix validation (for auto-import)
+	OrphanHandling             OrphanHandling  // How to handle missing parent issues (default: allow)
 	ClearDuplicateExternalRefs bool            // Clear duplicate external_ref values instead of erroring
 	ProtectLocalExportIDs      map[string]bool // IDs from left snapshot to protect from deletion (bd-sync-deletion fix)
 }
@@ -78,6 +80,18 @@ func ImportIssues(ctx context.Context, dbPath string, store storage.Storage, iss
 		MismatchPrefixes: make(map[string]int),
 	}
 
+	// Normalize Linear external_refs to canonical form to avoid slug-based duplicates.
+	for _, issue := range issues {
+		if issue.ExternalRef == nil || *issue.ExternalRef == "" {
+			continue
+		}
+		if linear.IsLinearExternalRef(*issue.ExternalRef) {
+			if canonical, ok := linear.CanonicalizeLinearExternalRef(*issue.ExternalRef); ok {
+				issue.ExternalRef = &canonical
+			}
+		}
+	}
+
 	// Compute content hashes for all incoming issues (bd-95)
 	// Always recompute to avoid stale/incorrect JSONL hashes (bd-1231)
 	for _, issue := range issues {
@@ -92,7 +106,13 @@ func ImportIssues(ctx context.Context, dbPath string, store storage.Storage, iss
 	if needCloseStore {
 		defer func() { _ = sqliteStore.Close() }()
 	}
-	
+
+	// GH#686: In multi-repo mode, skip prefix validation for all issues.
+	// Issues from additional repos have their own prefixes which are expected and correct.
+	if config.GetMultiRepoConfig() != nil && !opts.SkipPrefixValidation {
+		opts.SkipPrefixValidation = true
+	}
+
 	// Clear export_hashes before import to prevent staleness (bd-160)
 	// Import operations may add/update issues, so export_hashes entries become invalid
 	if !opts.DryRun {
@@ -100,7 +120,7 @@ func ImportIssues(ctx context.Context, dbPath string, store storage.Storage, iss
 			fmt.Fprintf(os.Stderr, "Warning: failed to clear export_hashes before import: %v\n", err)
 		}
 	}
-	
+
 	// Read orphan handling from config if not explicitly set
 	if opts.OrphanHandling == "" {
 		opts.OrphanHandling = sqliteStore.GetOrphanHandling(ctx)
@@ -195,6 +215,12 @@ func handlePrefixMismatch(ctx context.Context, sqliteStore *sqlite.SQLiteStorage
 
 	result.ExpectedPrefix = configuredPrefix
 
+	// GH#686: In multi-repo mode, allow all prefixes (nil = allow all)
+	allowedPrefixes := buildAllowedPrefixSet(configuredPrefix)
+	if allowedPrefixes == nil {
+		return issues, nil
+	}
+
 	// Analyze prefixes in imported issues
 	// Track tombstones separately - they don't count as "real" mismatches (bd-6pni)
 	tombstoneMismatchPrefixes := make(map[string]int)
@@ -206,7 +232,7 @@ func handlePrefixMismatch(ctx context.Context, sqliteStore *sqlite.SQLiteStorage
 
 	for _, issue := range issues {
 		prefix := utils.ExtractIssuePrefix(issue.ID)
-		if prefix != configuredPrefix {
+		if !allowedPrefixes[prefix] {
 			if issue.IsTombstone() {
 				tombstoneMismatchPrefixes[prefix]++
 				tombstonesToRemove = append(tombstonesToRemove, issue.ID)
@@ -358,7 +384,7 @@ func handleRename(ctx context.Context, s *sqlite.SQLiteStorage, existing *types.
 			}
 		}
 		return "", nil
-		
+
 		/* OLD CODE REMOVED (bd-8e05)
 		// Different content - this is a collision during rename
 		// Allocate a new ID for the incoming issue instead of using the desired ID
@@ -366,9 +392,9 @@ func handleRename(ctx context.Context, s *sqlite.SQLiteStorage, existing *types.
 		if err != nil || prefix == "" {
 			prefix = "bd"
 		}
-		
+
 		oldID := existing.ID
-		
+
 		// Retry up to 3 times to handle concurrent ID allocation
 		const maxRetries = 3
 		for attempt := 0; attempt < maxRetries; attempt++ {
@@ -376,42 +402,42 @@ func handleRename(ctx context.Context, s *sqlite.SQLiteStorage, existing *types.
 			if err != nil {
 				return "", fmt.Errorf("failed to generate new ID for rename collision: %w", err)
 			}
-			
+
 			// Update incoming issue to use the new ID
 			incoming.ID = newID
-			
+
 			// Delete old ID (only on first attempt)
 			if attempt == 0 {
 				if err := s.DeleteIssue(ctx, oldID); err != nil {
 					return "", fmt.Errorf("failed to delete old ID %s: %w", oldID, err)
 				}
 			}
-			
+
 			// Create with new ID
 			err = s.CreateIssue(ctx, incoming, "import-rename-collision")
 			if err == nil {
 				// Success!
 				return oldID, nil
 			}
-			
+
 			// Check if it's a UNIQUE constraint error
 			if !sqlite.IsUniqueConstraintError(err) {
 				// Not a UNIQUE constraint error, fail immediately
 				return "", fmt.Errorf("failed to create renamed issue with collision resolution %s: %w", newID, err)
 			}
-			
+
 			// UNIQUE constraint error - retry with new ID
 			if attempt == maxRetries-1 {
 				// Last attempt failed
 				return "", fmt.Errorf("failed to create renamed issue with collision resolution after %d retries: %w", maxRetries, err)
 			}
 		}
-		
+
 		// Note: We don't update text references here because it would be too expensive
 		// to scan all issues during every import. Text references to the old ID will
 		// eventually be cleaned up by manual reference updates or remain as stale.
 		// This is acceptable because the old ID no longer exists in the system.
-		
+
 		return oldID, nil
 		*/
 	}
@@ -454,34 +480,6 @@ func handleRename(ctx context.Context, s *sqlite.SQLiteStorage, existing *types.
 	return oldID, nil
 }
 
-// addReviewFieldUpdates adds review field updates to the updates map if appropriate.
-// Review field conflict resolution: incoming reviewed_at wins if newer than existing.
-// This ensures the most recent review state is preserved across clones.
-func addReviewFieldUpdates(updates map[string]interface{}, existing, incoming *types.Issue) {
-	// If incoming has no review timestamp, don't overwrite existing review state
-	if incoming.ReviewedAt == nil {
-		return
-	}
-
-	// If existing has no review timestamp, always use incoming
-	// Or if incoming is newer, use incoming
-	if existing.ReviewedAt == nil || incoming.ReviewedAt.After(*existing.ReviewedAt) {
-		// Update review fields from incoming
-		if incoming.ReviewStatus != "" {
-			updates["review_status"] = string(incoming.ReviewStatus)
-		} else {
-			updates["review_status"] = nil
-		}
-		if incoming.ReviewedBy != "" {
-			updates["reviewed_by"] = incoming.ReviewedBy
-		} else {
-			updates["reviewed_by"] = nil
-		}
-		updates["reviewed_at"] = incoming.ReviewedAt
-	}
-	// Otherwise, keep existing review fields (don't add to updates map)
-}
-
 // upsertIssues creates new issues or updates existing ones using content-first matching
 func upsertIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues []*types.Issue, opts Options, result *Result) error {
 	// Get all DB issues once - include tombstones to prevent UNIQUE constraint violations
@@ -490,15 +488,20 @@ func upsertIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues
 	if err != nil {
 		return fmt.Errorf("failed to get DB issues: %w", err)
 	}
-	
+
 	dbByHash := buildHashMap(dbIssues)
 	dbByID := buildIDMap(dbIssues)
-	
+
 	// Build external_ref map for O(1) lookup
 	dbByExternalRef := make(map[string]*types.Issue)
 	for _, issue := range dbIssues {
 		if issue.ExternalRef != nil && *issue.ExternalRef != "" {
 			dbByExternalRef[*issue.ExternalRef] = issue
+			if linear.IsLinearExternalRef(*issue.ExternalRef) {
+				if canonical, ok := linear.CanonicalizeLinearExternalRef(*issue.ExternalRef); ok {
+					dbByExternalRef[canonical] = issue
+				}
+			}
 		}
 	}
 
@@ -552,7 +555,7 @@ func upsertIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues
 						result.Unchanged++
 						continue
 					}
-					
+
 					// Build updates map
 					updates := make(map[string]interface{})
 					updates["title"] = incoming.Title
@@ -564,21 +567,23 @@ func upsertIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues
 					updates["acceptance_criteria"] = incoming.AcceptanceCriteria
 					updates["notes"] = incoming.Notes
 					updates["closed_at"] = incoming.ClosedAt
-					
-					if incoming.Assignee != "" {
-					 updates["assignee"] = incoming.Assignee
-					} else {
-					 updates["assignee"] = nil
+					// Pinned field (bd-phtv): Only update if explicitly true in JSONL
+					// (omitempty means false values are absent, so false = don't change existing)
+					if incoming.Pinned {
+						updates["pinned"] = incoming.Pinned
 					}
-					
-					if incoming.ExternalRef != nil && *incoming.ExternalRef != "" {
-					 updates["external_ref"] = *incoming.ExternalRef
-					} else {
-					 updates["external_ref"] = nil
-				}
 
-					// Add review field updates with conflict resolution (bd-238v)
-					addReviewFieldUpdates(updates, existing, incoming)
+					if incoming.Assignee != "" {
+						updates["assignee"] = incoming.Assignee
+					} else {
+						updates["assignee"] = nil
+					}
+
+					if incoming.ExternalRef != nil && *incoming.ExternalRef != "" {
+						updates["external_ref"] = *incoming.ExternalRef
+					} else {
+						updates["external_ref"] = nil
+					}
 
 					// Only update if data actually changed
 					if IssueDataChanged(existing, updates) {
@@ -648,7 +653,7 @@ func upsertIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues
 					result.Unchanged++
 					continue
 				}
-				
+
 				// Build updates map
 				updates := make(map[string]interface{})
 				updates["title"] = incoming.Title
@@ -659,22 +664,24 @@ func upsertIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues
 				updates["design"] = incoming.Design
 				updates["acceptance_criteria"] = incoming.AcceptanceCriteria
 				updates["notes"] = incoming.Notes
-			updates["closed_at"] = incoming.ClosedAt
+				updates["closed_at"] = incoming.ClosedAt
+				// Pinned field (bd-phtv): Only update if explicitly true in JSONL
+				// (omitempty means false values are absent, so false = don't change existing)
+				if incoming.Pinned {
+					updates["pinned"] = incoming.Pinned
+				}
 
 				if incoming.Assignee != "" {
-				 updates["assignee"] = incoming.Assignee
+					updates["assignee"] = incoming.Assignee
 				} else {
-				 updates["assignee"] = nil
-			}
+					updates["assignee"] = nil
+				}
 
 				if incoming.ExternalRef != nil && *incoming.ExternalRef != "" {
-				 updates["external_ref"] = *incoming.ExternalRef
+					updates["external_ref"] = *incoming.ExternalRef
 				} else {
-				 updates["external_ref"] = nil
-			}
-
-				// Add review field updates with conflict resolution (bd-238v)
-				addReviewFieldUpdates(updates, existingWithID, incoming)
+					updates["external_ref"] = nil
+				}
 
 				// Only update if data actually changed
 				if IssueDataChanged(existingWithID, updates) {
@@ -694,62 +701,62 @@ func upsertIssues(ctx context.Context, sqliteStore *sqlite.SQLiteStorage, issues
 		}
 	}
 
-// Filter out orphaned issues if orphan_handling is set to skip (bd-ckej)
-// Pre-filter before batch creation to prevent orphans from being created then ID-cleared
-if opts.OrphanHandling == sqlite.OrphanSkip {
-	var filteredNewIssues []*types.Issue
-	for _, issue := range newIssues {
-		// Check if this is a hierarchical child whose parent doesn't exist
-		if strings.Contains(issue.ID, ".") {
-			lastDot := strings.LastIndex(issue.ID, ".")
-			parentID := issue.ID[:lastDot]
-			
-			// Check if parent exists in either existing DB issues or in newIssues batch
-			var parentExists bool
-			for _, dbIssue := range dbIssues {
-				if dbIssue.ID == parentID {
-					parentExists = true
-					break
-				}
-			}
-			if !parentExists {
-				for _, newIssue := range newIssues {
-					if newIssue.ID == parentID {
+	// Filter out orphaned issues if orphan_handling is set to skip (bd-ckej)
+	// Pre-filter before batch creation to prevent orphans from being created then ID-cleared
+	if opts.OrphanHandling == sqlite.OrphanSkip {
+		var filteredNewIssues []*types.Issue
+		for _, issue := range newIssues {
+			// Check if this is a hierarchical child whose parent doesn't exist
+			if strings.Contains(issue.ID, ".") {
+				lastDot := strings.LastIndex(issue.ID, ".")
+				parentID := issue.ID[:lastDot]
+
+				// Check if parent exists in either existing DB issues or in newIssues batch
+				var parentExists bool
+				for _, dbIssue := range dbIssues {
+					if dbIssue.ID == parentID {
 						parentExists = true
 						break
 					}
 				}
+				if !parentExists {
+					for _, newIssue := range newIssues {
+						if newIssue.ID == parentID {
+							parentExists = true
+							break
+						}
+					}
+				}
+
+				if !parentExists {
+					// Skip this orphaned issue
+					result.Skipped++
+					continue
+				}
 			}
-			
-			if !parentExists {
-				// Skip this orphaned issue
-				result.Skipped++
-				continue
-			}
+			filteredNewIssues = append(filteredNewIssues, issue)
 		}
-		filteredNewIssues = append(filteredNewIssues, issue)
+		newIssues = filteredNewIssues
 	}
-	newIssues = filteredNewIssues
-}
 
-// Batch create all new issues
-// Sort by hierarchy depth to ensure parents are created before children
-if len(newIssues) > 0 {
- sort.Slice(newIssues, func(i, j int) bool {
-   depthI := strings.Count(newIssues[i].ID, ".")
-  depthJ := strings.Count(newIssues[j].ID, ".")
+	// Batch create all new issues
+	// Sort by hierarchy depth to ensure parents are created before children
+	if len(newIssues) > 0 {
+		sort.Slice(newIssues, func(i, j int) bool {
+			depthI := strings.Count(newIssues[i].ID, ".")
+			depthJ := strings.Count(newIssues[j].ID, ".")
 			if depthI != depthJ {
-   return depthI < depthJ // Shallower first
-  }
-  return newIssues[i].ID < newIssues[j].ID // Stable sort
-})
+				return depthI < depthJ // Shallower first
+			}
+			return newIssues[i].ID < newIssues[j].ID // Stable sort
+		})
 
-// Create in batches by depth level (max depth 3)
+		// Create in batches by depth level (max depth 3)
 		for depth := 0; depth <= 3; depth++ {
-    var batchForDepth []*types.Issue
-    for _, issue := range newIssues {
-     if strings.Count(issue.ID, ".") == depth {
-     batchForDepth = append(batchForDepth, issue)
+			var batchForDepth []*types.Issue
+			for _, issue := range newIssues {
+				if strings.Count(issue.ID, ".") == depth {
+					batchForDepth = append(batchForDepth, issue)
 				}
 			}
 			if len(batchForDepth) > 0 {
@@ -910,7 +917,7 @@ func GetPrefixList(prefixes map[string]int) []string {
 
 func validateNoDuplicateExternalRefs(issues []*types.Issue, clearDuplicates bool, result *Result) error {
 	seen := make(map[string][]string)
-	
+
 	for _, issue := range issues {
 		if issue.ExternalRef != nil && *issue.ExternalRef != "" {
 			ref := *issue.ExternalRef
@@ -944,10 +951,19 @@ func validateNoDuplicateExternalRefs(issues []*types.Issue, clearDuplicates bool
 			}
 			return nil
 		}
-		
+
 		sort.Strings(duplicates)
 		return fmt.Errorf("batch import contains duplicate external_ref values:\n%s\n\nUse --clear-duplicate-external-refs to automatically clear duplicates", strings.Join(duplicates, "\n"))
 	}
 
 	return nil
+}
+
+// buildAllowedPrefixSet returns allowed prefixes, or nil to allow all (GH#686).
+// In multi-repo mode, additional repos have their own prefixes - allow all.
+func buildAllowedPrefixSet(primaryPrefix string) map[string]bool {
+	if config.GetMultiRepoConfig() != nil {
+		return nil // Multi-repo: allow all prefixes
+	}
+	return map[string]bool{primaryPrefix: true}
 }

@@ -1,41 +1,60 @@
 package main
+
 import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"github.com/fatih/color"
+
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/util"
+	"github.com/steveyegge/beads/internal/utils"
 )
+
 var readyCmd = &cobra.Command{
 	Use:   "ready",
 	Short: "Show ready work (no blockers, open or in_progress)",
+	Long: `Show ready work (issues with no blockers that are open or in_progress).
+
+Use --mol to filter to a specific molecule's steps:
+  bd ready --mol bd-patrol   # Show ready steps within molecule
+
+This is useful for agents executing molecules to see which steps can run next.`,
 	Run: func(cmd *cobra.Command, args []string) {
+		// Handle molecule-specific ready query
+		molID, _ := cmd.Flags().GetString("mol")
+		if molID != "" {
+			runMoleculeReady(cmd, molID)
+			return
+		}
+
 		limit, _ := cmd.Flags().GetInt("limit")
 		assignee, _ := cmd.Flags().GetString("assignee")
 		unassigned, _ := cmd.Flags().GetBool("unassigned")
 		sortPolicy, _ := cmd.Flags().GetString("sort")
 		labels, _ := cmd.Flags().GetStringSlice("label")
 		labelsAny, _ := cmd.Flags().GetStringSlice("label-any")
-		approvedOnly, _ := cmd.Flags().GetBool("approved-only")
-		unreviewedOnly, _ := cmd.Flags().GetBool("unreviewed-only")
+		issueType, _ := cmd.Flags().GetString("type")
 		// Use global jsonOutput set by PersistentPreRun (respects config.yaml + env vars)
-
-		// Validate mutually exclusive flags
-		if approvedOnly && unreviewedOnly {
-			fmt.Fprintf(os.Stderr, "Error: --approved-only and --unreviewed-only are mutually exclusive\n")
-			os.Exit(1)
-		}
 
 		// Normalize labels: trim, dedupe, remove empty
 		labels = util.NormalizeLabels(labels)
 		labelsAny = util.NormalizeLabels(labelsAny)
 
+		// Apply directory-aware label scoping if no labels explicitly provided (GH#541)
+		if len(labels) == 0 && len(labelsAny) == 0 {
+			if dirLabels := config.GetDirectoryLabels(); len(dirLabels) > 0 {
+				labelsAny = dirLabels
+			}
+		}
+
 		filter := types.WorkFilter{
 			// Leave Status empty to get both 'open' and 'in_progress' (bd-165)
+			Type:       issueType,
 			Limit:      limit,
 			Unassigned: unassigned,
 			SortPolicy: types.SortPolicy(sortPolicy),
@@ -58,14 +77,13 @@ var readyCmd = &cobra.Command{
 		// If daemon is running, use RPC
 		if daemonClient != nil {
 			readyArgs := &rpc.ReadyArgs{
-				Assignee:       assignee,
-				Unassigned:     unassigned,
-				Limit:          limit,
-				SortPolicy:     sortPolicy,
-				Labels:         labels,
-				LabelsAny:      labelsAny,
-				ApprovedOnly:   approvedOnly,
-				UnreviewedOnly: unreviewedOnly,
+				Assignee:   assignee,
+				Unassigned: unassigned,
+				Type:       issueType,
+				Limit:      limit,
+				SortPolicy: sortPolicy,
+				Labels:     labels,
+				LabelsAny:  labelsAny,
 			}
 			if cmd.Flags().Changed("priority") {
 				priority, _ := cmd.Flags().GetInt("priority")
@@ -81,9 +99,6 @@ var readyCmd = &cobra.Command{
 				fmt.Fprintf(os.Stderr, "Error parsing response: %v\n", err)
 				os.Exit(1)
 			}
-			// Note: Filtering is now done server-side by daemon, but we keep client-side
-			// filtering as a fallback for older daemon versions that don't support review filters
-			issues = filterByReviewStatus(issues, approvedOnly, unreviewedOnly)
 			if jsonOutput {
 				if issues == nil {
 					issues = []*types.Issue{}
@@ -105,20 +120,20 @@ var readyCmd = &cobra.Command{
 						hasOpenIssues = stats.OpenIssues > 0 || stats.InProgressIssues > 0
 					}
 				}
-				yellow := color.New(color.FgYellow).SprintFunc()
 				if hasOpenIssues {
 					fmt.Printf("\n%s No ready work found (all issues have blocking dependencies)\n\n",
-						yellow("✨"))
+						ui.RenderWarn("✨"))
 				} else {
-					green := color.New(color.FgGreen).SprintFunc()
-					fmt.Printf("\n%s No open issues\n\n", green("✨"))
+					fmt.Printf("\n%s No open issues\n\n", ui.RenderPass("✨"))
 				}
 				return
 			}
-			cyan := color.New(color.FgCyan).SprintFunc()
-			fmt.Printf("\n%s Ready work (%d issues with no blockers):\n\n", cyan("📋"), len(issues))
+			fmt.Printf("\n%s Ready work (%d issues with no blockers):\n\n", ui.RenderAccent("📋"), len(issues))
 			for i, issue := range issues {
-				fmt.Printf("%d. [P%d] %s: %s\n", i+1, issue.Priority, issue.ID, issue.Title)
+				fmt.Printf("%d. [%s] [%s] %s: %s\n", i+1,
+					ui.RenderPriority(issue.Priority),
+					ui.RenderType(string(issue.IssueType)),
+					ui.RenderID(issue.ID), issue.Title)
 				if issue.EstimatedMinutes != nil {
 					fmt.Printf("   Estimate: %d min\n", *issue.EstimatedMinutes)
 				}
@@ -157,8 +172,6 @@ var readyCmd = &cobra.Command{
 			}
 		}
 	}
-		// Filter by review status if requested
-		issues = filterByReviewStatus(issues, approvedOnly, unreviewedOnly)
 		if jsonOutput {
 			// Always output array, even if empty
 			if issues == nil {
@@ -177,21 +190,21 @@ var readyCmd = &cobra.Command{
 				hasOpenIssues = stats.OpenIssues > 0 || stats.InProgressIssues > 0
 			}
 			if hasOpenIssues {
-				yellow := color.New(color.FgYellow).SprintFunc()
 				fmt.Printf("\n%s No ready work found (all issues have blocking dependencies)\n\n",
-					yellow("✨"))
+					ui.RenderWarn("✨"))
 			} else {
-				green := color.New(color.FgGreen).SprintFunc()
-				fmt.Printf("\n%s No open issues\n\n", green("✨"))
+				fmt.Printf("\n%s No open issues\n\n", ui.RenderPass("✨"))
 			}
 			// Show tip even when no ready work found
 			maybeShowTip(store)
 			return
 		}
-		cyan := color.New(color.FgCyan).SprintFunc()
-		fmt.Printf("\n%s Ready work (%d issues with no blockers):\n\n", cyan("📋"), len(issues))
+		fmt.Printf("\n%s Ready work (%d issues with no blockers):\n\n", ui.RenderAccent("📋"), len(issues))
 		for i, issue := range issues {
-			fmt.Printf("%d. [P%d] %s: %s\n", i+1, issue.Priority, issue.ID, issue.Title)
+			fmt.Printf("%d. [%s] [%s] %s: %s\n", i+1,
+				ui.RenderPriority(issue.Priority),
+				ui.RenderType(string(issue.IssueType)),
+				ui.RenderID(issue.ID), issue.Title)
 			if issue.EstimatedMinutes != nil {
 				fmt.Printf("   Estimate: %d min\n", *issue.EstimatedMinutes)
 			}
@@ -235,14 +248,14 @@ var blockedCmd = &cobra.Command{
 			return
 		}
 		if len(blocked) == 0 {
-			green := color.New(color.FgGreen).SprintFunc()
-			fmt.Printf("\n%s No blocked issues\n\n", green("✨"))
+			fmt.Printf("\n%s No blocked issues\n\n", ui.RenderPass("✨"))
 			return
 		}
-		red := color.New(color.FgRed).SprintFunc()
-		fmt.Printf("\n%s Blocked issues (%d):\n\n", red("🚫"), len(blocked))
+		fmt.Printf("\n%s Blocked issues (%d):\n\n", ui.RenderFail("🚫"), len(blocked))
 		for _, issue := range blocked {
-			fmt.Printf("[P%d] %s: %s\n", issue.Priority, issue.ID, issue.Title)
+			fmt.Printf("[%s] %s: %s\n",
+				ui.RenderPriority(issue.Priority),
+				ui.RenderID(issue.ID), issue.Title)
 			blockedBy := issue.BlockedBy
 			if blockedBy == nil {
 				blockedBy = []string{}
@@ -253,114 +266,138 @@ var blockedCmd = &cobra.Command{
 		}
 	},
 }
-var statsCmd = &cobra.Command{
-	Use:   "stats",
-	Short: "Show statistics",
-	Run: func(cmd *cobra.Command, args []string) {
-		// Use global jsonOutput set by PersistentPreRun (respects config.yaml + env vars)
-		// If daemon is running, use RPC
+
+// runMoleculeReady shows ready steps within a specific molecule
+func runMoleculeReady(_ *cobra.Command, molIDArg string) {
+	ctx := rootCtx
+
+	// Molecule-ready requires direct store access for subgraph loading
+	if store == nil {
 		if daemonClient != nil {
-			resp, err := daemonClient.Stats()
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
-			var stats types.Statistics
-			if err := json.Unmarshal(resp.Data, &stats); err != nil {
-				fmt.Fprintf(os.Stderr, "Error parsing response: %v\n", err)
-				os.Exit(1)
-			}
-			if jsonOutput {
-				outputJSON(stats)
-				return
-			}
-			cyan := color.New(color.FgCyan).SprintFunc()
-			green := color.New(color.FgGreen).SprintFunc()
-			yellow := color.New(color.FgYellow).SprintFunc()
-			fmt.Printf("\n%s Beads Statistics:\n\n", cyan("📊"))
-			fmt.Printf("Total Issues:      %d\n", stats.TotalIssues)
-			fmt.Printf("Open:              %s\n", green(fmt.Sprintf("%d", stats.OpenIssues)))
-			fmt.Printf("In Progress:       %s\n", yellow(fmt.Sprintf("%d", stats.InProgressIssues)))
-			fmt.Printf("Closed:            %d\n", stats.ClosedIssues)
-			fmt.Printf("Blocked:           %d\n", stats.BlockedIssues)
-			fmt.Printf("Ready:             %s\n", green(fmt.Sprintf("%d", stats.ReadyIssues)))
-			if stats.TombstoneIssues > 0 {
-				fmt.Printf("Deleted:           %d (tombstones)\n", stats.TombstoneIssues)
-			}
-			if stats.PinnedIssues > 0 {
-				fmt.Printf("Pinned:            %d\n", stats.PinnedIssues)
-			}
-			if stats.AverageLeadTime > 0 {
-				fmt.Printf("Avg Lead Time:     %.1f hours\n", stats.AverageLeadTime)
-			}
-			fmt.Println()
-			return
+			fmt.Fprintf(os.Stderr, "Error: bd ready --mol requires direct database access\n")
+			fmt.Fprintf(os.Stderr, "Hint: use --no-daemon flag: bd --no-daemon ready --mol %s\n", molIDArg)
+		} else {
+			fmt.Fprintf(os.Stderr, "Error: no database connection\n")
 		}
-		// Direct mode
-		ctx := rootCtx
-		stats, err := store.GetStatistics(ctx)
-		if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
-		}
-	// If no issues found, check if git has issues and auto-import
-	if stats.TotalIssues == 0 {
-		if checkAndAutoImport(ctx, store) {
-			// Re-run the stats after import
-			stats, err = store.GetStatistics(ctx)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
-		}
-	}
-		if jsonOutput {
-			outputJSON(stats)
-			return
-		}
-		cyan := color.New(color.FgCyan).SprintFunc()
-		green := color.New(color.FgGreen).SprintFunc()
-		yellow := color.New(color.FgYellow).SprintFunc()
-		fmt.Printf("\n%s Beads Statistics:\n\n", cyan("📊"))
-		fmt.Printf("Total Issues:           %d\n", stats.TotalIssues)
-		fmt.Printf("Open:                   %s\n", green(fmt.Sprintf("%d", stats.OpenIssues)))
-		fmt.Printf("In Progress:            %s\n", yellow(fmt.Sprintf("%d", stats.InProgressIssues)))
-		fmt.Printf("Closed:                 %d\n", stats.ClosedIssues)
-		fmt.Printf("Blocked:                %d\n", stats.BlockedIssues)
-		fmt.Printf("Ready:                  %s\n", green(fmt.Sprintf("%d", stats.ReadyIssues)))
-		if stats.TombstoneIssues > 0 {
-			fmt.Printf("Deleted:                %d (tombstones)\n", stats.TombstoneIssues)
-		}
-		if stats.PinnedIssues > 0 {
-			fmt.Printf("Pinned:                 %d\n", stats.PinnedIssues)
-		}
-		if stats.EpicsEligibleForClosure > 0 {
-			fmt.Printf("Epics Ready to Close:   %s\n", green(fmt.Sprintf("%d", stats.EpicsEligibleForClosure)))
-		}
-		if stats.AverageLeadTime > 0 {
-			fmt.Printf("Avg Lead Time:          %.1f hours\n", stats.AverageLeadTime)
-		}
-		fmt.Println()
-	},
-}
-// filterByReviewStatus filters issues by review status.
-// If approvedOnly is true, returns only issues with review_status='approved'.
-// If unreviewedOnly is true, returns only issues with review_status='unreviewed' or empty.
-// If neither is true, returns all issues unchanged.
-func filterByReviewStatus(issues []*types.Issue, approvedOnly, unreviewedOnly bool) []*types.Issue {
-	if !approvedOnly && !unreviewedOnly {
-		return issues
 	}
 
-	var filtered []*types.Issue
-	for _, issue := range issues {
-		if approvedOnly && issue.ReviewStatus == types.ReviewStatusApproved {
-			filtered = append(filtered, issue)
-		} else if unreviewedOnly && (issue.ReviewStatus == "" || issue.ReviewStatus == types.ReviewStatusUnreviewed) {
-			filtered = append(filtered, issue)
+	// Resolve molecule ID
+	moleculeID, err := utils.ResolvePartialID(ctx, store, molIDArg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: molecule '%s' not found\n", molIDArg)
+		os.Exit(1)
+	}
+
+	// Load molecule subgraph
+	subgraph, err := loadTemplateSubgraph(ctx, store, moleculeID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading molecule: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Get parallel analysis to find ready steps
+	analysis := analyzeMoleculeParallel(subgraph)
+
+	// Collect ready steps
+	var readySteps []*MoleculeReadyStep
+	for _, issue := range subgraph.Issues {
+		info := analysis.Steps[issue.ID]
+		if info != nil && info.IsReady {
+			readySteps = append(readySteps, &MoleculeReadyStep{
+				Issue:         issue,
+				ParallelInfo:  info,
+				ParallelGroup: info.ParallelGroup,
+			})
 		}
 	}
-	return filtered
+
+	if jsonOutput {
+		output := MoleculeReadyOutput{
+			MoleculeID:     moleculeID,
+			MoleculeTitle:  subgraph.Root.Title,
+			TotalSteps:     analysis.TotalSteps,
+			ReadySteps:     len(readySteps),
+			Steps:          readySteps,
+			ParallelGroups: analysis.ParallelGroups,
+		}
+		outputJSON(output)
+		return
+	}
+
+	// Human-readable output
+	fmt.Printf("\n%s Ready steps in molecule: %s\n", ui.RenderAccent("🧪"), subgraph.Root.Title)
+	fmt.Printf("   ID: %s\n", moleculeID)
+	fmt.Printf("   Total: %d steps, %d ready\n", analysis.TotalSteps, len(readySteps))
+
+	if len(readySteps) == 0 {
+		fmt.Printf("\n%s No ready steps (all blocked or completed)\n\n", ui.RenderWarn("✨"))
+		return
+	}
+
+	// Show parallel groups if any
+	if len(analysis.ParallelGroups) > 0 {
+		fmt.Printf("\n%s Parallel Groups:\n", ui.RenderPass("⚡"))
+		for groupName, members := range analysis.ParallelGroups {
+			// Check if any members are ready
+			readyInGroup := 0
+			for _, id := range members {
+				if info := analysis.Steps[id]; info != nil && info.IsReady {
+					readyInGroup++
+				}
+			}
+			if readyInGroup > 0 {
+				fmt.Printf("   %s: %d ready\n", groupName, readyInGroup)
+			}
+		}
+	}
+
+	fmt.Printf("\n%s Ready steps:\n\n", ui.RenderPass("📋"))
+	for i, step := range readySteps {
+		// Show parallel group if in one
+		groupAnnotation := ""
+		if step.ParallelGroup != "" {
+			groupAnnotation = fmt.Sprintf(" [%s]", ui.RenderAccent(step.ParallelGroup))
+		}
+
+		fmt.Printf("%d. [%s] [%s] %s: %s%s\n", i+1,
+			ui.RenderPriority(step.Issue.Priority),
+			ui.RenderType(string(step.Issue.IssueType)),
+			ui.RenderID(step.Issue.ID),
+			step.Issue.Title,
+			groupAnnotation)
+
+		// Show what this step can parallelize with
+		if len(step.ParallelInfo.CanParallel) > 0 {
+			readyParallel := []string{}
+			for _, pID := range step.ParallelInfo.CanParallel {
+				if pInfo := analysis.Steps[pID]; pInfo != nil && pInfo.IsReady {
+					readyParallel = append(readyParallel, pID)
+				}
+			}
+			if len(readyParallel) > 0 {
+				fmt.Printf("   Can run with: %v\n", readyParallel)
+			}
+		}
+	}
+	fmt.Println()
+}
+
+// MoleculeReadyStep holds a ready step with its parallel info
+type MoleculeReadyStep struct {
+	Issue         *types.Issue  `json:"issue"`
+	ParallelInfo  *ParallelInfo `json:"parallel_info"`
+	ParallelGroup string        `json:"parallel_group,omitempty"`
+}
+
+// MoleculeReadyOutput is the JSON output for bd ready --mol
+type MoleculeReadyOutput struct {
+	MoleculeID     string                  `json:"molecule_id"`
+	MoleculeTitle  string                  `json:"molecule_title"`
+	TotalSteps     int                     `json:"total_steps"`
+	ReadySteps     int                     `json:"ready_steps"`
+	Steps          []*MoleculeReadyStep    `json:"steps"`
+	ParallelGroups map[string][]string     `json:"parallel_groups"`
 }
 
 func init() {
@@ -371,9 +408,8 @@ func init() {
 	readyCmd.Flags().StringP("sort", "s", "hybrid", "Sort policy: hybrid (default), priority, oldest")
 	readyCmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL). Can combine with --label-any")
 	readyCmd.Flags().StringSlice("label-any", []string{}, "Filter by labels (OR: must have AT LEAST ONE). Can combine with --label")
-	readyCmd.Flags().Bool("approved-only", false, "Show only approved issues (review_status='approved')")
-	readyCmd.Flags().Bool("unreviewed-only", false, "Show only unreviewed issues (review_status='unreviewed' or empty)")
+	readyCmd.Flags().StringP("type", "t", "", "Filter by issue type (task, bug, feature, epic, merge-request)")
+	readyCmd.Flags().String("mol", "", "Filter to steps within a specific molecule")
 	rootCmd.AddCommand(readyCmd)
 	rootCmd.AddCommand(blockedCmd)
-	rootCmd.AddCommand(statsCmd)
 }

@@ -116,3 +116,8 @@ history/
 
 # Gas Town agent state
 state.json
+.beads/redirect
+.beads-wisp/
+
+# Claude Code runtime
+.runtime/

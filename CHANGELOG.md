@@ -7,6 +7,294 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.35.0] - 2025-12-23
+
+### Added
+
+- **Dynamic molecule bonding** (bd-xo1o.1) - Attach templates to running molecules at runtime
+  - `bd mol bond <proto> <target> --ref <issue-id>` - Inject template steps dynamically
+  - Enables responsive workflows: attach error recovery, expand scope mid-execution
+  - Templates can reference existing issue data via `--ref` for variable interpolation
+
+- **`bd activity` command** (bd-xo1o.3) - Real-time state feed for workflow monitoring
+  - Stream mutation events as they happen (JSON format)
+  - Monitor molecule progress without polling
+  - Useful for dashboards, debugging, and automation
+
+- **`waits-for` dependency type** (bd-xo1o.2) - Fanout coordination gates
+  - `bd dep add <gate> <step> --type waits-for` - Gate waits for all steps
+  - Unlike `blocks`, waits-for is used for parallel coordination (fan-in pattern)
+  - Gate unblocks only when ALL waits-for dependencies complete
+
+- **Parallel step detection** (bd-xo1o.4) - Auto-identify parallelizable work
+  - Molecules automatically detect steps that can run concurrently
+  - `bd mol show` displays parallel-capable step groups
+  - Helps agents optimize execution order
+
+- **Molecule navigation commands** (bd-sal9, bd-ieyy) - Track progress through workflows
+  - `bd mol current` - Show current step and molecule progress
+  - `bd close --continue` - Auto-advance to next step in molecule
+  - `bd close --no-auto` - Close without auto-claiming next step
+
+- **`bd list --parent` flag** (bd-yqhh) - Filter issues by parent
+  - `bd list --parent=bd-xyz --status=open` shows open children of bd-xyz
+  - Useful for epic progress tracking and molecule step listing
+
+- **Conditional bond type** (bd-kzda) - Run steps only when predecessors fail
+  - `bd mol bond --type conditional-blocks` for error-handling workflows
+  - Step B runs only if step A fails (useful for fallback paths)
+
+- **External dependency display** (bd-vks2) - Show cross-project deps in tree view
+  - `bd dep tree` now displays external dependencies with repo prefix
+  - Satisfied external deps filtered from blocked issues
+
+- **Performance optimization indexes** (bd-bha9, bd-a9y3) - Faster queries for large databases
+  - Added indexes for common query patterns
+  - Improved GetReadyWork and SearchIssues performance
+
+### Changed
+
+- **Consolidated doctor --fix** (GH#715, bd-bqcc) - Single command for all fixes
+  - `bd doctor --fix` now handles: hooks, permissions, sync branch, schema
+  - Removed individual `bd migrate`, `bd hooks install` suggestions
+  - Daemon health check integrated into doctor flow
+
+- **Auto_pull config** (GH#707) - Periodic remote sync in event-driven mode
+  - `bd config set daemon.auto_pull true` enables pull every 5 minutes
+  - Prevents staleness when git changes happen outside daemon's watch
+
+### Fixed
+
+- **Rich mutation events for status changes** (bd-313v) - Events now include full context
+  - Status transitions emit complete before/after state
+  - Enables better monitoring and auditing
+
+- **External deps filtered from GetBlockedIssues** (bd-396j) - Correct blocking calculation
+  - External dependencies no longer incorrectly block local work
+  - Only local blocking deps affect ready queue
+
+- **Parallel execution migration race** (GH#720) - Multiple daemons no longer corrupt DB
+  - Added file-based migration lock to prevent concurrent schema changes
+  - Retry logic when migration lock is held by another process
+
+- **bd create -f with daemon** (GH#719) - File flag now works in daemon mode
+  - `-f/--file` flag properly forwarded through RPC
+
+- **FindJSONLInDir interactions.jsonl** (GH#709) - No longer picks wrong file
+  - Skip `interactions.jsonl` when discovering JSONL files
+
+- **Daemon duplicate log messages** (PR#713) - Reduced log spam
+- **Worktree health check redundancy** (PR#711) - Integrated into CreateBeadsWorktree
+- **Diverged sync branch handling** (GH#697) - Auto-recovery on push failure
+- **Tombstones in JSONL export** (GH#696) - Deletions now propagate correctly
+
+### Refactored
+
+- Remove legacy autoflush code paths (bd-xsl9)
+- Consolidate duplicate path-finding utilities (bd-74w1, bd-4nqq)
+- Replace map[string]interface{} with typed JSON structs (bd-u2sc.1)
+- Migrate sort.Slice to slices.SortFunc (bd-u2sc.2)
+- Add testEnv helpers, reduce SQLite test file sizes (bd-4opy)
+
+## [0.34.0] - 2025-12-22
+
+### Added
+
+- **Wisp commands** (bd-kwjh) - Full ephemeral molecule management
+  - `bd wisp create <proto>` - Instantiate proto as ephemeral wisp (solid→vapor)
+  - `bd wisp list` - List all wisps with stale detection
+  - `bd wisp gc` - Garbage collect orphaned wisps
+  - Wisps live in `.beads-wisp/` (gitignored), never sync to remote
+
+- **Chemistry UX commands** - Phase-aware molecule operations
+  - `bd pour <proto>` - Instantiate proto as persistent mol (solid→liquid)
+  - `bd mol bond --wisp` - Force spawn as vapor when attaching to mol
+  - `bd mol bond --pour` - Force spawn as liquid when attaching to wisp
+  - Cross-store squash: condense wisp to digest in main storage
+
+- **Cross-project dependencies** (bd-66w1, bd-om4a) - Reference issues across repos
+  - `external:<repo>:<id>` dependency syntax
+  - `bd ship <id> --to <repo>` - Ship issues to other beads repos
+  - `bd ready` filters by external dependency satisfaction
+  - Configure additional repos in `.beads/config.yaml`
+
+- **Orphan detection in bd doctor** (bd-5hrq) - Find issues with missing parents
+  - Detects parent-child relationships pointing to deleted issues
+  - Suggests fix commands for orphaned issues
+
+### Changed
+
+- **Multi-repo config uses YAML** (GH#683) - `bd repo add/remove` now writes to `.beads/config.yaml`
+  - Fixes disconnect where CLI wrote to DB but hydration read from YAML
+  - `bd repo remove` now cleans up hydrated issues from removed repo
+  - Breaking: `bd repo add` no longer accepts optional alias argument
+
+### Fixed
+
+- **Wisp storage initialization** - NewWispStorage now copies issue_prefix from main db
+- **Prefix validation in multi-repo mode** (GH#686) - Skip validation for external repos
+- **Empty config values** (GH#680, GH#684) - Handle gracefully in getRepoConfig()
+- **Doctor UX improvements** (GH#687) - Better diagnostics and daemon integration
+- **Orphaned test file** - Removed repo_test.go with undefined functions
+
+## [0.33.2] - 2025-12-21
+
+## [0.33.1] - 2025-12-21
+
+### Changed
+
+- **Ephemeral → Wisp rename** - Aligns with Steam Engine metaphor (wisps = ephemeral vapor)
+  - JSON field changed from `ephemeral` to `wisp` (breaking change for API consumers)
+  - CLI flag changed from `--ephemeral` to `--wisp` on `bd cleanup`
+  - SQLite column remains `ephemeral` (no migration needed)
+
+### Fixed
+
+- **Lint error in mail.go** - Added nosec directive for mail delegate exec.Command
+
+## [0.33.0] - 2025-12-21
+
+### Added
+
+- **Wisp molecules** (bd-2vh3) - Spawn molecules as wisps by default
+  - `bd mol spawn` creates wisp issues that live only in SQLite
+  - Wisp issues never export to JSONL (prevents zombie resurrection)
+  - Use `--persistent` flag to opt out of wisp spawning
+  - `bd mol squash` compresses wisp children into a digest issue
+  - `--summary` flag allows agents to provide AI-generated summaries
+
+### Fixed
+
+- **Comments not deleted with issue** (bd-687g) - `DeleteIssue` now cascades to comments table
+
+## [0.32.1] - 2025-12-21
+
+### Added
+
+- **MCP output control parameters** (PR#667) - Reduce context window usage by up to 97%
+  - `brief` - Return minimal responses: `BriefIssue` for reads, `OperationResult` for writes
+  - `brief_deps` - Full issue with compact dependencies
+  - `fields` - Custom field projection with validation
+  - `max_description_length` - Truncate long descriptions
+  - New models: `BriefIssue`, `BriefDep`, `OperationResult`
+  - Default `brief=True` for writes (minimal confirmations)
+
+- **MCP filtering parameters** - Align MCP tools with CLI capabilities
+  - `labels` / `labels_any` - AND/OR label filtering
+  - `query` - Title search (case-insensitive)
+  - `unassigned` - Filter to unassigned issues
+  - `sort_policy` - Sort ready work by hybrid/priority/oldest
+
+### Fixed
+
+- **Pin field not in allowed update fields** (gt-zr0a)
+  - `bd update --pinned` was failing with "invalid field" error
+  - Added `pinned` to allowedUpdateFields and importer
+
+## [0.32.0] - 2025-12-20
+
+### Changed
+
+- **Removed `bd mail` commands** - Mail is orchestration, not data plane
+  - Removed: `bd mail send`, `bd mail inbox`, `bd mail read`, `bd mail ack`, `bd mail reply`
+  - The underlying data model is unchanged: `type=message`, `Sender`, `Ephemeral`, `replies_to` fields remain
+  - Orchestration tools should implement mail interfaces on top of the beads data model
+  - This follows the principle that beads is a data store, not a workflow engine
+
+### Fixed
+
+- **Symlink preservation in atomicWriteFile** (PR#665) - Thanks @qmx
+  - `bd setup claude` no longer clobbers nix/home-manager managed `~/.claude/settings.json`
+  - New `ResolveForWrite()` helper writes to symlink target instead of replacing symlink
+
+- **Broken link in examples** (GH#666) - Fixed LABELS.md link in multiple-personas example
+
+## [0.31.0] - 2025-12-20
+
+### Added
+
+- **`bd defer` / `bd undefer` commands** (bd-4jr) - New "deferred" status for icebox issues
+  - Issues that are deliberately postponed, not blocked by dependencies
+  - Deferred issues excluded from `bd ready` and shown with ❄️ snowflake styling
+  - Full support in MCP server, graph views, and statistics
+
+- **Agent audit trail** (GH#649) - Append-only logging for AI agent interactions
+  - New `.beads/interactions.jsonl` audit file
+  - `bd audit record` - Log LLM calls, tool calls, or pipe JSON via stdin
+  - `bd audit label <id>` - Append quality labels (good/bad) for dataset curation
+  - `bd compact --audit` - Optionally log compaction prompts/responses
+  - Audit entries are immutable; labels create new referencing entries
+
+- **Directory-aware label scoping** (GH#541) - Auto-filter issues by directory in monorepos
+  - Configure `directory.labels` to map paths to label filters
+  - `bd ready` and `bd list` auto-apply when in matching directories
+  - Example: `packages/maverick: maverick` shows only maverick-labeled issues
+
+- **Molecules catalog** (gt-0ei3) - Separate storage for template molecules
+  - Templates now live in `molecules.jsonl`, distinct from work items
+  - Hierarchical loading: built-in → town → user → project
+  - Molecules use `mol-*` ID namespace with `is_template: true`
+
+- **Windows winget manifest** (GH#524) - Prepare beads for Windows Package Manager
+  - Added manifest files for winget submission
+  - Once merged to microsoft/winget-pkgs: `winget install SteveYegge.beads`
+
+- **Git commit configuration** (GH#600) - Control beads auto-commit behavior
+  - `git.author` - Override commit author (useful for bots)
+  - `git.no-gpg-sign` - Disable GPG signing (fixes Touch ID prompts)
+
+- **Require description config** (GH#596) - Enforce descriptions on issue creation
+  - Set `create.require-description: true` to error on missing descriptions
+  - Also supports `BD_CREATE_REQUIRE_DESCRIPTION` env var
+
+### Changed
+
+- **`bd stats` merged into `bd status`** (GH#644) - Consolidated status commands
+  - `stats` now an alias for `status`
+  - Colorized output with emoji header
+  - Shows all statistics (tombstones, pinned, epics, lead time)
+  - Added `--no-activity` flag to skip git activity parsing
+
+- **Thin hook shims** (GH#615) - Hooks now delegate to `bd hooks run`
+  - Eliminates hook version drift after upgrades
+  - No more manual `bd hooks install --force` needed
+  - Shims use `# bd-shim v1` marker (format version, not bd version)
+
+- **MCP context tool consolidation** - Merged 3 tools into 1
+  - Combined `set_context`, `where_am_i`, `init` into single `context` tool
+  - Actions: `set` (default with workspace_root), `show` (default), `init`
+
+- **Doctor improvements** (GH#656) - Enhanced diagnostics and testing
+  - Visual improvements with grouped output
+  - Comprehensive test coverage added
+  - Fixed gosec warnings
+  - Contributed by @rsnodgrass
+
+### Fixed
+
+- **`relates-to` cycle detection** (GH#661) - Exclude relates-to from cycle detection
+  - Relates-to links are bidirectional by design, not cycles
+
+- **Doctor `.local_version` check** (GH#662) - Check correct version file
+  - Now checks `.local_version` instead of deprecated `LastBdVersion`
+
+- **Doctor Claude plugin link** (GH#623) - Updated broken documentation link
+
+- **Read-only gitignore in stealth mode** (GH#663) - Print manual instructions instead of failing
+  - When global gitignore is read-only (e.g., symlink to immutable location), shows what to add manually
+  - Contributed by @qmx
+
+## [0.30.7] - 2025-12-19
+
+### Fixed
+
+- **`bd graph` nil pointer crash** (#657) - Fixed crash when running `bd graph` on epics
+  - `renderGraph()` was passed `nil` instead of the subgraph, causing panic in `computeDependencyCounts()`
+
+- **Windows npm installer file lock** (#652) - Fixed installation failure on Windows
+  - The download file handle wasn't fully closed before extraction attempted
+  - Now properly waits for `file.close()` callback before proceeding
+
 ## [0.30.6] - 2025-12-18
 
 ### Added
@@ -82,7 +370,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Messaging schema fields** (bd-kwro.1) - Foundation for inter-agent messaging
   - New `message` issue type for agent-to-agent communication
-  - New fields: `sender`, `ephemeral`, `replies_to`, `relates_to`, `duplicate_of`, `superseded_by`
+  - New fields: `sender`, `wisp`, `replies_to`, `relates_to`, `duplicate_of`, `superseded_by`
   - New dependency types: `replies-to`, `relates-to`, `duplicates`, `supersedes`
   - Schema migration 019 (automatic on first use)
 
@@ -108,8 +396,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `.beads/hooks/on_message` - Runs after message send
   - Hooks receive issue ID, event type as args, full JSON on stdin
 
-- **`bd cleanup --ephemeral` flag** (bd-kwro.9) - Clean up transient messages
-  - Deletes only closed issues with `ephemeral=true`
+- **`bd cleanup --wisp` flag** (bd-kwro.9) - Clean up transient messages
+  - Deletes only closed issues with `wisp=true`
   - Useful for cleaning up messages after swarms complete
 
 ### Fixed

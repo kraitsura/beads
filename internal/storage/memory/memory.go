@@ -571,6 +571,20 @@ func (m *MemoryStorage) SearchIssues(ctx context.Context, query string, filter t
 			}
 		}
 
+		// Parent filtering (bd-yqhh): filter children by parent issue
+		if filter.ParentID != nil {
+			isChild := false
+			for _, dep := range m.dependencies[issue.ID] {
+				if dep.Type == types.DepParentChild && dep.DependsOnID == *filter.ParentID {
+					isChild = true
+					break
+				}
+			}
+			if !isChild {
+				continue
+			}
+		}
+
 		// Copy issue and attach metadata
 		issueCopy := *issue
 		if deps, ok := m.dependencies[issue.ID]; ok {
@@ -902,6 +916,11 @@ func (m *MemoryStorage) GetReadyWork(ctx context.Context, filter types.WorkFilte
 	var results []*types.Issue
 
 	for _, issue := range m.issues {
+		// Skip pinned issues - they are context markers, not actionable work (bd-o9o)
+		if issue.Pinned {
+			continue
+		}
+
 		// Status filtering: default to open OR in_progress if not specified
 		if filter.Status == "" {
 			if issue.Status != types.StatusOpen && issue.Status != types.StatusInProgress {
@@ -1033,7 +1052,7 @@ func (m *MemoryStorage) GetReadyWork(ctx context.Context, filter types.WorkFilte
 	return results, nil
 }
 
-// getOpenBlockers returns the IDs of blockers that are currently open/in_progress/blocked.
+// getOpenBlockers returns the IDs of blockers that are currently open/in_progress/blocked/deferred.
 // The caller must hold at least a read lock.
 func (m *MemoryStorage) getOpenBlockers(issueID string) []string {
 	deps := m.dependencies[issueID]
@@ -1053,7 +1072,7 @@ func (m *MemoryStorage) getOpenBlockers(issueID string) []string {
 			continue
 		}
 		switch blocker.Status {
-		case types.StatusOpen, types.StatusInProgress, types.StatusBlocked:
+		case types.StatusOpen, types.StatusInProgress, types.StatusBlocked, types.StatusDeferred:
 			blockers = append(blockers, blocker.ID)
 		}
 	}
@@ -1063,6 +1082,7 @@ func (m *MemoryStorage) getOpenBlockers(issueID string) []string {
 }
 
 // GetBlockedIssues returns issues that are blocked by other issues
+// Note: Pinned issues are excluded from the output (beads-ei4)
 func (m *MemoryStorage) GetBlockedIssues(ctx context.Context) ([]*types.BlockedIssue, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -1075,8 +1095,14 @@ func (m *MemoryStorage) GetBlockedIssues(ctx context.Context) ([]*types.BlockedI
 			continue
 		}
 
+		// Exclude pinned issues (beads-ei4)
+		if issue.Pinned {
+			continue
+		}
+
 		blockers := m.getOpenBlockers(issue.ID)
-		if issue.Status != types.StatusBlocked && len(blockers) == 0 {
+		// Issue is "blocked" if: status is blocked, status is deferred, or has open blockers
+		if issue.Status != types.StatusBlocked && issue.Status != types.StatusDeferred && len(blockers) == 0 {
 			continue
 		}
 
@@ -1213,13 +1239,17 @@ func (m *MemoryStorage) GetStatistics(ctx context.Context) (*types.Statistics, e
 			stats.InProgressIssues++
 		case types.StatusClosed:
 			stats.ClosedIssues++
+		case types.StatusDeferred:
+			stats.DeferredIssues++
 		case types.StatusTombstone:
 			stats.TombstoneIssues++
+		case types.StatusPinned:
+			stats.PinnedIssues++
 		}
 	}
 
 	// TotalIssues excludes tombstones (matches SQLite behavior)
-	stats.TotalIssues = stats.OpenIssues + stats.InProgressIssues + stats.ClosedIssues
+	stats.TotalIssues = stats.OpenIssues + stats.InProgressIssues + stats.ClosedIssues + stats.DeferredIssues + stats.PinnedIssues
 
 	// Second pass: calculate blocked and ready issues based on dependencies
 	// An issue is blocked if it has open blockers (uses same logic as GetBlockedIssues)

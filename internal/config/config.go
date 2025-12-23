@@ -91,11 +91,13 @@ func Initialize() error {
 	_ = v.BindEnv("flush-debounce", "BEADS_FLUSH_DEBOUNCE")
 	_ = v.BindEnv("auto-start-daemon", "BEADS_AUTO_START_DAEMON")
 	_ = v.BindEnv("identity", "BEADS_IDENTITY")
+	_ = v.BindEnv("remote-sync-interval", "BEADS_REMOTE_SYNC_INTERVAL")
 	
 	// Set defaults for additional settings
 	v.SetDefault("flush-debounce", "30s")
 	v.SetDefault("auto-start-daemon", true)
 	v.SetDefault("identity", "")
+	v.SetDefault("remote-sync-interval", "30s")
 	
 	// Routing configuration defaults
 	v.SetDefault("routing.mode", "auto")
@@ -108,6 +110,21 @@ func Initialize() error {
 
 	// Push configuration defaults
 	v.SetDefault("no-push", false)
+
+	// Create command defaults
+	v.SetDefault("create.require-description", false)
+
+	// Git configuration defaults (GH#600)
+	v.SetDefault("git.author", "")        // Override commit author (e.g., "beads-bot <beads@example.com>")
+	v.SetDefault("git.no-gpg-sign", false) // Disable GPG signing for beads commits
+
+	// Directory-aware label scoping (GH#541)
+	// Maps directory patterns to labels for automatic filtering in monorepos
+	v.SetDefault("directory.labels", map[string]string{})
+
+	// External projects for cross-project dependency resolution (bd-h807)
+	// Maps project names to paths for resolving external: blocked_by references
+	v.SetDefault("external_projects", map[string]string{})
 
 	// Read config file if it was found
 	if configFileSet {
@@ -189,6 +206,44 @@ func GetStringSlice(key string) []string {
 	return v.GetStringSlice(key)
 }
 
+// GetStringMapString retrieves a map[string]string configuration value
+func GetStringMapString(key string) map[string]string {
+	if v == nil {
+		return map[string]string{}
+	}
+	return v.GetStringMapString(key)
+}
+
+// GetDirectoryLabels returns labels for the current working directory based on config.
+// It checks directory.labels config for matching patterns.
+// Returns nil if no labels are configured for the current directory.
+func GetDirectoryLabels() []string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil
+	}
+
+	dirLabels := GetStringMapString("directory.labels")
+	if len(dirLabels) == 0 {
+		return nil
+	}
+
+	// Check each configured directory pattern
+	for pattern, label := range dirLabels {
+		// Support both exact match and suffix match
+		// e.g., "packages/maverick" matches "/path/to/repo/packages/maverick"
+		if strings.HasSuffix(cwd, pattern) || strings.HasSuffix(cwd, filepath.Clean(pattern)) {
+			return []string{label}
+		}
+		// Also try as a path prefix (user might be in a subdirectory)
+		if strings.Contains(cwd, "/"+pattern+"/") || strings.Contains(cwd, "/"+pattern) {
+			return []string{label}
+		}
+	}
+
+	return nil
+}
+
 // MultiRepoConfig contains configuration for multi-repo support
 type MultiRepoConfig struct {
 	Primary    string   // Primary repo path (where canonical issues live)
@@ -212,6 +267,80 @@ func GetMultiRepoConfig() *MultiRepoConfig {
 		Primary:    primary,
 		Additional: v.GetStringSlice("repos.additional"),
 	}
+}
+
+// GetExternalProjects returns the external_projects configuration.
+// Maps project names to paths for cross-project dependency resolution.
+// Example config.yaml:
+//
+//	external_projects:
+//	  beads: ../beads
+//	  gastown: /absolute/path/to/gastown
+func GetExternalProjects() map[string]string {
+	return GetStringMapString("external_projects")
+}
+
+// ResolveExternalProjectPath resolves a project name to its absolute path.
+// Returns empty string if project not configured or path doesn't exist.
+func ResolveExternalProjectPath(projectName string) string {
+	projects := GetExternalProjects()
+	path, ok := projects[projectName]
+	if !ok {
+		return ""
+	}
+
+	// Expand relative paths from config file location or cwd
+	if !filepath.IsAbs(path) {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return ""
+		}
+		path = filepath.Join(cwd, path)
+	}
+
+	// Verify path exists
+	if _, err := os.Stat(path); err != nil {
+		return ""
+	}
+
+	return path
+}
+
+// HookEntry represents a single config-based hook
+type HookEntry struct {
+	Command string `yaml:"command" mapstructure:"command"` // Shell command to run
+	Name    string `yaml:"name" mapstructure:"name"`       // Optional display name
+}
+
+// GetCloseHooks returns the on_close hooks from config
+func GetCloseHooks() []HookEntry {
+	if v == nil {
+		return nil
+	}
+	var hooks []HookEntry
+	raw := v.Get("hooks.on_close")
+	if raw == nil {
+		return nil
+	}
+
+	// Handle slice of maps (from YAML parsing)
+	if rawSlice, ok := raw.([]interface{}); ok {
+		for _, item := range rawSlice {
+			if m, ok := item.(map[string]interface{}); ok {
+				entry := HookEntry{}
+				if cmd, ok := m["command"].(string); ok {
+					entry.Command = cmd
+				}
+				if name, ok := m["name"].(string); ok {
+					entry.Name = name
+				}
+				if entry.Command != "" {
+					hooks = append(hooks, entry)
+				}
+			}
+		}
+	}
+	return hooks
 }
 
 // GetIdentity resolves the user's identity for messaging.

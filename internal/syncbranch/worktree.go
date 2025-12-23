@@ -77,27 +77,17 @@ func CommitToSyncBranch(ctx context.Context, repoRoot, syncBranch, jsonlPath str
 		Branch: syncBranch,
 	}
 
-	// Worktree path is under .git/beads-worktrees/<branch>
-	worktreePath := filepath.Join(repoRoot, ".git", "beads-worktrees", syncBranch)
+	// GH#639: Use git-common-dir for worktree path to support bare repos
+	worktreePath := getBeadsWorktreePath(ctx, repoRoot, syncBranch)
 
 	// Initialize worktree manager
 	wtMgr := git.NewWorktreeManager(repoRoot)
 
-	// Ensure worktree exists
+	// Ensure worktree exists and is healthy
+	// CreateBeadsWorktree performs a full health check internally and
+	// automatically repairs unhealthy worktrees by removing and recreating them
 	if err := wtMgr.CreateBeadsWorktree(syncBranch, worktreePath); err != nil {
 		return nil, fmt.Errorf("failed to create worktree: %w", err)
-	}
-
-	// Check worktree health and repair if needed
-	if err := wtMgr.CheckWorktreeHealth(worktreePath); err != nil {
-		// Try to recreate worktree
-		if err := wtMgr.RemoveBeadsWorktree(worktreePath); err != nil {
-			// Log but continue - removal might fail but recreation might work
-			_ = err
-		}
-		if err := wtMgr.CreateBeadsWorktree(syncBranch, worktreePath); err != nil {
-			return nil, fmt.Errorf("failed to recreate worktree after health check: %w", err)
-		}
 	}
 
 	// Get remote name
@@ -240,8 +230,8 @@ func PullFromSyncBranch(ctx context.Context, repoRoot, syncBranch, jsonlPath str
 		JSONLPath: jsonlPath,
 	}
 
-	// Worktree path is under .git/beads-worktrees/<branch>
-	worktreePath := filepath.Join(repoRoot, ".git", "beads-worktrees", syncBranch)
+	// GH#639: Use git-common-dir for worktree path to support bare repos
+	worktreePath := getBeadsWorktreePath(ctx, repoRoot, syncBranch)
 
 	// Initialize worktree manager
 	wtMgr := git.NewWorktreeManager(repoRoot)
@@ -469,8 +459,8 @@ func CheckDivergence(ctx context.Context, repoRoot, syncBranch string) (*Diverge
 		Branch: syncBranch,
 	}
 
-	// Worktree path is under .git/beads-worktrees/<branch>
-	worktreePath := filepath.Join(repoRoot, ".git", "beads-worktrees", syncBranch)
+	// GH#639: Use git-common-dir for worktree path to support bare repos
+	worktreePath := getBeadsWorktreePath(ctx, repoRoot, syncBranch)
 
 	// Initialize worktree manager
 	wtMgr := git.NewWorktreeManager(repoRoot)
@@ -526,8 +516,8 @@ func CheckDivergence(ctx context.Context, repoRoot, syncBranch string) (*Diverge
 //
 // Returns error if reset fails.
 func ResetToRemote(ctx context.Context, repoRoot, syncBranch, jsonlPath string) error {
-	// Worktree path is under .git/beads-worktrees/<branch>
-	worktreePath := filepath.Join(repoRoot, ".git", "beads-worktrees", syncBranch)
+	// GH#639: Use git-common-dir for worktree path to support bare repos
+	worktreePath := getBeadsWorktreePath(ctx, repoRoot, syncBranch)
 
 	// Initialize worktree manager
 	wtMgr := git.NewWorktreeManager(repoRoot)
@@ -774,6 +764,35 @@ func fetchAndRebaseInWorktree(ctx context.Context, worktreePath, branch, remote 
 	return nil
 }
 
+// runCmdWithTimeoutMessage runs a command and prints a helpful message if it takes too long.
+// This helps when git operations hang waiting for credential/browser auth.
+//
+// Parameters:
+//   - ctx: Context for cancellation
+//   - timeoutMsg: Message to print when timeout is reached (e.g., "Waiting for Git authentication in browser...")
+//   - timeoutDelay: Duration to wait before printing message (e.g., 5 seconds)
+//   - cmd: The command to run
+//
+// Returns: combined output and error from the command
+func runCmdWithTimeoutMessage(ctx context.Context, timeoutMsg string, timeoutDelay time.Duration, cmd *exec.Cmd) ([]byte, error) {
+	// Use done channel to cleanly exit goroutine when command completes
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-time.After(timeoutDelay):
+			fmt.Fprintf(os.Stderr, "⏳ %s\n", timeoutMsg)
+		case <-done:
+			// Command completed, exit cleanly
+		case <-ctx.Done():
+			// Context canceled, don't print message
+		}
+	}()
+
+	output, err := cmd.CombinedOutput()
+	close(done)
+	return output, err
+}
+
 // pushFromWorktree pushes the sync branch from the worktree with retry logic
 // for handling concurrent push conflicts (non-fast-forward errors).
 func pushFromWorktree(ctx context.Context, worktreePath, branch string) error {
@@ -787,7 +806,14 @@ func pushFromWorktree(ctx context.Context, worktreePath, branch string) error {
 		// Set BD_SYNC_IN_PROGRESS so pre-push hook knows to skip checks (GH#532)
 		// This prevents circular error where hook suggests running bd sync
 		cmd.Env = append(os.Environ(), "BD_SYNC_IN_PROGRESS=1")
-		output, err := cmd.CombinedOutput()
+
+		// Run with timeout message in case of hanging auth
+		output, err := runCmdWithTimeoutMessage(
+			ctx,
+			fmt.Sprintf("Git push is waiting (possibly for authentication). If this hangs, check for a browser auth prompt."),
+			5*time.Second,
+			cmd,
+		)
 
 		if err == nil {
 			return nil // Success
@@ -856,6 +882,28 @@ func PushSyncBranch(ctx context.Context, repoRoot, syncBranch string) error {
 	}
 
 	return pushFromWorktree(ctx, worktreePath, syncBranch)
+}
+
+// getBeadsWorktreePath returns the path where beads worktrees should be stored.
+// GH#639: Uses git rev-parse --git-common-dir to correctly handle bare repos and worktrees.
+// For regular repos, this is typically .git/beads-worktrees/<branch>.
+// For bare repos or worktrees of bare repos, this uses the common git directory.
+func getBeadsWorktreePath(ctx context.Context, repoRoot, syncBranch string) string {
+	// Try to get the git common directory using git's native API
+	// This handles all cases: regular repos, worktrees, bare repos
+	cmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "rev-parse", "--git-common-dir")
+	output, err := cmd.Output()
+	if err == nil {
+		gitCommonDir := strings.TrimSpace(string(output))
+		// Make path absolute if it's relative
+		if !filepath.IsAbs(gitCommonDir) {
+			gitCommonDir = filepath.Join(repoRoot, gitCommonDir)
+		}
+		return filepath.Join(gitCommonDir, "beads-worktrees", syncBranch)
+	}
+
+	// Fallback to legacy behavior for compatibility
+	return filepath.Join(repoRoot, ".git", "beads-worktrees", syncBranch)
 }
 
 // getRemoteForBranch gets the remote name for a branch, defaulting to "origin"

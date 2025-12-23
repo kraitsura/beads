@@ -2,19 +2,22 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
 	"os"
-	"sort"
+	"slices"
 	"strings"
 	"text/template"
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/util"
 	"github.com/steveyegge/beads/internal/validation"
 )
@@ -37,62 +40,71 @@ func parseTimeFlag(s string) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("unable to parse time %q (try formats: 2006-01-02, 2006-01-02T15:04:05, or RFC3339)", s)
 }
 
+// pinIndicator returns a pushpin emoji prefix for pinned issues (bd-18b, bd-7h5)
+func pinIndicator(issue *types.Issue) string {
+	if issue.Pinned {
+		return "📌 "
+	}
+	return ""
+}
+
 // sortIssues sorts a slice of issues by the specified field and direction
 func sortIssues(issues []*types.Issue, sortBy string, reverse bool) {
 	if sortBy == "" {
 		return
 	}
 
-	sort.Slice(issues, func(i, j int) bool {
-		var less bool
+	slices.SortFunc(issues, func(a, b *types.Issue) int {
+		var result int
 
 		switch sortBy {
 		case "priority":
 			// Lower priority numbers come first (P0 > P1 > P2 > P3 > P4)
-			less = issues[i].Priority < issues[j].Priority
+			result = cmp.Compare(a.Priority, b.Priority)
 		case "created":
 			// Default: newest first (descending)
-			less = issues[i].CreatedAt.After(issues[j].CreatedAt)
+			result = b.CreatedAt.Compare(a.CreatedAt)
 		case "updated":
 			// Default: newest first (descending)
-			less = issues[i].UpdatedAt.After(issues[j].UpdatedAt)
+			result = b.UpdatedAt.Compare(a.UpdatedAt)
 		case "closed":
 			// Default: newest first (descending)
 			// Handle nil ClosedAt values
-			if issues[i].ClosedAt == nil && issues[j].ClosedAt == nil {
-				less = false
-			} else if issues[i].ClosedAt == nil {
-				less = false // nil sorts last
-			} else if issues[j].ClosedAt == nil {
-				less = true // non-nil sorts before nil
+			if a.ClosedAt == nil && b.ClosedAt == nil {
+				result = 0
+			} else if a.ClosedAt == nil {
+				result = 1 // nil sorts last
+			} else if b.ClosedAt == nil {
+				result = -1 // non-nil sorts before nil
 			} else {
-				less = issues[i].ClosedAt.After(*issues[j].ClosedAt)
+				result = b.ClosedAt.Compare(*a.ClosedAt)
 			}
 		case "status":
-			less = issues[i].Status < issues[j].Status
+			result = cmp.Compare(a.Status, b.Status)
 		case "id":
-			less = issues[i].ID < issues[j].ID
+			result = cmp.Compare(a.ID, b.ID)
 		case "title":
-			less = strings.ToLower(issues[i].Title) < strings.ToLower(issues[j].Title)
+			result = cmp.Compare(strings.ToLower(a.Title), strings.ToLower(b.Title))
 		case "type":
-			less = issues[i].IssueType < issues[j].IssueType
+			result = cmp.Compare(a.IssueType, b.IssueType)
 		case "assignee":
-			less = issues[i].Assignee < issues[j].Assignee
+			result = cmp.Compare(a.Assignee, b.Assignee)
 		default:
 			// Unknown sort field, no sorting
-			less = false
+			result = 0
 		}
 
 		if reverse {
-			return !less
+			return -result
 		}
-		return less
+		return result
 	})
 }
 
 var listCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List issues",
+	Use:     "list",
+	GroupID: "issues",
+	Short:   "List issues",
 	Run: func(cmd *cobra.Command, args []string) {
 		status, _ := cmd.Flags().GetString("status")
 		assignee, _ := cmd.Flags().GetString("assignee")
@@ -128,12 +140,29 @@ var listCmd = &cobra.Command{
 		// Priority range flags
 		priorityMinStr, _ := cmd.Flags().GetString("priority-min")
 		priorityMaxStr, _ := cmd.Flags().GetString("priority-max")
-		
+
+		// Pinned filtering flags (bd-p8e)
+		pinnedFlag, _ := cmd.Flags().GetBool("pinned")
+		noPinnedFlag, _ := cmd.Flags().GetBool("no-pinned")
+
+		// Template filtering (beads-1ra)
+		includeTemplates, _ := cmd.Flags().GetBool("include-templates")
+
+		// Parent filtering (bd-yqhh)
+		parentID, _ := cmd.Flags().GetString("parent")
+
 		// Use global jsonOutput set by PersistentPreRun
 
 		// Normalize labels: trim, dedupe, remove empty
 		labels = util.NormalizeLabels(labels)
-	labelsAny = util.NormalizeLabels(labelsAny)
+		labelsAny = util.NormalizeLabels(labelsAny)
+
+		// Apply directory-aware label scoping if no labels explicitly provided (GH#541)
+		if len(labels) == 0 && len(labelsAny) == 0 {
+			if dirLabels := config.GetDirectoryLabels(); len(dirLabels) > 0 {
+				labelsAny = dirLabels
+			}
+		}
 
 		filter := types.IssueFilter{
 			Limit: limit,
@@ -265,6 +294,31 @@ var listCmd = &cobra.Command{
 			filter.PriorityMax = &priorityMax
 		}
 
+		// Pinned filtering (bd-p8e): --pinned and --no-pinned are mutually exclusive
+		if pinnedFlag && noPinnedFlag {
+			fmt.Fprintf(os.Stderr, "Error: --pinned and --no-pinned are mutually exclusive\n")
+			os.Exit(1)
+		}
+		if pinnedFlag {
+			pinned := true
+			filter.Pinned = &pinned
+		} else if noPinnedFlag {
+			pinned := false
+			filter.Pinned = &pinned
+		}
+
+		// Template filtering (beads-1ra): exclude templates by default
+		// Use --include-templates to show all issues including templates
+		if !includeTemplates {
+			isTemplate := false
+			filter.IsTemplate = &isTemplate
+		}
+
+		// Parent filtering (bd-yqhh): filter children by parent issue
+		if parentID != "" {
+			filter.ParentID = &parentID
+		}
+
 		// Check database freshness before reading (bd-2q6d, bd-c4rq)
 		// Skip check when using daemon (daemon auto-imports on staleness)
 		ctx := rootCtx
@@ -340,6 +394,15 @@ var listCmd = &cobra.Command{
 			listArgs.PriorityMin = filter.PriorityMin
 			listArgs.PriorityMax = filter.PriorityMax
 
+			// Pinned filtering (bd-p8e)
+			listArgs.Pinned = filter.Pinned
+
+			// Template filtering (beads-1ra)
+			listArgs.IncludeTemplates = includeTemplates
+
+			// Parent filtering (bd-yqhh)
+			listArgs.ParentID = parentID
+
 			 resp, err := daemonClient.List(listArgs)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -373,8 +436,22 @@ var listCmd = &cobra.Command{
 				// Long format: multi-line with details
 				fmt.Printf("\nFound %d issues:\n\n", len(issues))
 				for _, issue := range issues {
-					fmt.Printf("%s [P%d] [%s] %s\n", issue.ID, issue.Priority, issue.IssueType, issue.Status)
-					fmt.Printf("  %s\n", issue.Title)
+					status := string(issue.Status)
+					if status == "closed" {
+						// Entire closed issue is dimmed
+						line := fmt.Sprintf("%s%s [P%d] [%s] %s\n  %s",
+							pinIndicator(issue), issue.ID, issue.Priority,
+							issue.IssueType, status, issue.Title)
+						fmt.Println(ui.RenderClosedLine(line))
+					} else {
+						fmt.Printf("%s%s [%s] [%s] %s\n",
+							pinIndicator(issue),
+							ui.RenderID(issue.ID),
+							ui.RenderPriority(issue.Priority),
+							ui.RenderType(string(issue.IssueType)),
+							ui.RenderStatus(status))
+						fmt.Printf("  %s\n", issue.Title)
+					}
 					if issue.Assignee != "" {
 						fmt.Printf("  Assignee: %s\n", issue.Assignee)
 					}
@@ -394,9 +471,22 @@ var listCmd = &cobra.Command{
 					if issue.Assignee != "" {
 						assigneeStr = fmt.Sprintf(" @%s", issue.Assignee)
 					}
-					fmt.Printf("%s [P%d] [%s] %s%s%s - %s\n",
-						issue.ID, issue.Priority, issue.IssueType, issue.Status,
-						assigneeStr, labelsStr, issue.Title)
+					status := string(issue.Status)
+					if status == "closed" {
+						// Entire closed line is dimmed
+						line := fmt.Sprintf("%s%s [P%d] [%s] %s%s%s - %s",
+							pinIndicator(issue), issue.ID, issue.Priority,
+							issue.IssueType, status, assigneeStr, labelsStr, issue.Title)
+						fmt.Println(ui.RenderClosedLine(line))
+					} else {
+						fmt.Printf("%s%s [%s] [%s] %s%s%s - %s\n",
+							pinIndicator(issue),
+							ui.RenderID(issue.ID),
+							ui.RenderPriority(issue.Priority),
+							ui.RenderType(string(issue.IssueType)),
+							ui.RenderStatus(status),
+							assigneeStr, labelsStr, issue.Title)
+					}
 				}
 			}
 			return
@@ -480,9 +570,23 @@ var listCmd = &cobra.Command{
 			fmt.Printf("\nFound %d issues:\n\n", len(issues))
 			for _, issue := range issues {
 				labels := labelsMap[issue.ID]
+				status := string(issue.Status)
 
-				fmt.Printf("%s [P%d] [%s] %s\n", issue.ID, issue.Priority, issue.IssueType, issue.Status)
-				fmt.Printf("  %s\n", issue.Title)
+				if status == "closed" {
+					// Entire closed issue is dimmed
+					line := fmt.Sprintf("%s%s [P%d] [%s] %s\n  %s",
+						pinIndicator(issue), issue.ID, issue.Priority,
+						issue.IssueType, status, issue.Title)
+					fmt.Println(ui.RenderClosedLine(line))
+				} else {
+					fmt.Printf("%s%s [%s] [%s] %s\n",
+						pinIndicator(issue),
+						ui.RenderID(issue.ID),
+						ui.RenderPriority(issue.Priority),
+						ui.RenderType(string(issue.IssueType)),
+						ui.RenderStatus(status))
+					fmt.Printf("  %s\n", issue.Title)
+				}
 				if issue.Assignee != "" {
 					fmt.Printf("  Assignee: %s\n", issue.Assignee)
 				}
@@ -504,9 +608,22 @@ var listCmd = &cobra.Command{
 				if issue.Assignee != "" {
 					assigneeStr = fmt.Sprintf(" @%s", issue.Assignee)
 				}
-				fmt.Printf("%s [P%d] [%s] %s%s%s - %s\n",
-					issue.ID, issue.Priority, issue.IssueType, issue.Status,
-					assigneeStr, labelsStr, issue.Title)
+				status := string(issue.Status)
+				if status == "closed" {
+					// Entire closed line is dimmed
+					line := fmt.Sprintf("%s%s [P%d] [%s] %s%s%s - %s",
+						pinIndicator(issue), issue.ID, issue.Priority,
+						issue.IssueType, status, assigneeStr, labelsStr, issue.Title)
+					fmt.Println(ui.RenderClosedLine(line))
+				} else {
+					fmt.Printf("%s%s [%s] [%s] %s%s%s - %s\n",
+						pinIndicator(issue),
+						ui.RenderID(issue.ID),
+						ui.RenderPriority(issue.Priority),
+						ui.RenderType(string(issue.IssueType)),
+						ui.RenderStatus(status),
+						assigneeStr, labelsStr, issue.Title)
+				}
 			}
 		}
 
@@ -516,10 +633,10 @@ var listCmd = &cobra.Command{
 }
 
 func init() {
-	listCmd.Flags().StringP("status", "s", "", "Filter by status (open, in_progress, blocked, closed)")
+	listCmd.Flags().StringP("status", "s", "", "Filter by status (open, in_progress, blocked, deferred, closed)")
 	registerPriorityFlag(listCmd, "")
 	listCmd.Flags().StringP("assignee", "a", "", "Filter by assignee")
-	listCmd.Flags().StringP("type", "t", "", "Filter by type (bug, feature, task, epic, chore, merge-request)")
+	listCmd.Flags().StringP("type", "t", "", "Filter by type (bug, feature, task, epic, chore, merge-request, molecule, gate)")
 	listCmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL). Can combine with --label-any")
 	listCmd.Flags().StringSlice("label-any", []string{}, "Filter by labels (OR: must have AT LEAST ONE). Can combine with --label")
 	listCmd.Flags().String("title", "", "Filter by title text (case-insensitive substring match)")
@@ -552,7 +669,17 @@ func init() {
 	// Priority ranges
 	listCmd.Flags().String("priority-min", "", "Filter by minimum priority (inclusive, 0-4 or P0-P4)")
 	listCmd.Flags().String("priority-max", "", "Filter by maximum priority (inclusive, 0-4 or P0-P4)")
-	
+
+	// Pinned filtering (bd-p8e)
+	listCmd.Flags().Bool("pinned", false, "Show only pinned issues")
+	listCmd.Flags().Bool("no-pinned", false, "Exclude pinned issues")
+
+	// Template filtering (beads-1ra): exclude templates by default
+	listCmd.Flags().Bool("include-templates", false, "Include template molecules in output")
+
+	// Parent filtering (bd-yqhh): filter children by parent issue
+	listCmd.Flags().String("parent", "", "Filter by parent issue ID (shows children of specified issue)")
+
 	// Note: --json flag is defined as a persistent flag in main.go, not here
 	rootCmd.AddCommand(listCmd)
 }

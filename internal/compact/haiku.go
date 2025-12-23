@@ -13,6 +13,7 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/steveyegge/beads/internal/audit"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -32,10 +33,12 @@ type HaikuClient struct {
 	tier1Template  *template.Template
 	maxRetries     int
 	initialBackoff time.Duration
+	auditEnabled   bool
+	auditActor     string
 }
 
 // NewHaikuClient creates a new Haiku API client. Env var ANTHROPIC_API_KEY takes precedence over explicit apiKey.
-func NewHaikuClient(apiKey string) (*HaikuClient, error) {
+func NewHaikuClient(apiKey string, opts ...option.RequestOption) (*HaikuClient, error) {
 	envKey := os.Getenv("ANTHROPIC_API_KEY")
 	if envKey != "" {
 		apiKey = envKey
@@ -44,7 +47,10 @@ func NewHaikuClient(apiKey string) (*HaikuClient, error) {
 		return nil, fmt.Errorf("%w: set ANTHROPIC_API_KEY environment variable or provide via config", ErrAPIKeyRequired)
 	}
 
-	client := anthropic.NewClient(option.WithAPIKey(apiKey))
+	// Build options: API key first, then any additional options (for testing)
+	allOpts := []option.RequestOption{option.WithAPIKey(apiKey)}
+	allOpts = append(allOpts, opts...)
+	client := anthropic.NewClient(allOpts...)
 
 	tier1Tmpl, err := template.New("tier1").Parse(tier1PromptTemplate)
 	if err != nil {
@@ -67,7 +73,23 @@ func (h *HaikuClient) SummarizeTier1(ctx context.Context, issue *types.Issue) (s
 		return "", fmt.Errorf("failed to render prompt: %w", err)
 	}
 
-	return h.callWithRetry(ctx, prompt)
+	resp, callErr := h.callWithRetry(ctx, prompt)
+	if h.auditEnabled {
+		// Best-effort: never fail compaction because audit logging failed.
+		e := &audit.Entry{
+			Kind:     "llm_call",
+			Actor:    h.auditActor,
+			IssueID:  issue.ID,
+			Model:    string(h.model),
+			Prompt:   prompt,
+			Response: resp,
+		}
+		if callErr != nil {
+			e.Error = callErr.Error()
+		}
+		_, _ = audit.Append(e)
+	}
+	return resp, callErr
 }
 
 func (h *HaikuClient) callWithRetry(ctx context.Context, prompt string) (string, error) {

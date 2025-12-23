@@ -7,15 +7,16 @@ import (
 	"os"
 	"sort"
 	"strings"
-	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
 )
 var labelCmd = &cobra.Command{
-	Use:   "label",
-	Short: "Manage issue labels",
+	Use:     "label",
+	GroupID: "issues",
+	Short:   "Manage issue labels",
 }
 // Helper function to process label operations for multiple issues
 func processBatchLabelOperation(issueIDs []string, label string, operation string, jsonOut bool,
@@ -40,14 +41,13 @@ func processBatchLabelOperation(issueIDs []string, label string, operation strin
 				"label":    label,
 			})
 		} else {
-			green := color.New(color.FgGreen).SprintFunc()
 			verb := "Added"
 			prep := "to"
 			if operation == "removed" {
 				verb = "Removed"
 				prep = "from"
 			}
-			fmt.Printf("%s %s label '%s' %s %s\n", green("✓"), verb, label, prep, issueID)
+			fmt.Printf("%s %s label '%s' %s %s\n", ui.RenderPass("✓"), verb, label, prep, issueID)
 		}
 	}
 	if len(issueIDs) > 0 && daemonClient == nil {
@@ -98,6 +98,15 @@ var labelAddCmd = &cobra.Command{
 			resolvedIDs = append(resolvedIDs, fullID)
 		}
 		issueIDs = resolvedIDs
+
+		// Protect reserved label namespaces (bd-eijl)
+		// provides:* labels can only be added via 'bd ship' command
+		if strings.HasPrefix(label, "provides:") {
+			fmt.Fprintf(os.Stderr, "Error: 'provides:' labels are reserved for cross-project capabilities\n")
+			fmt.Fprintf(os.Stderr, "Hint: use 'bd ship %s' instead\n", strings.TrimPrefix(label, "provides:"))
+			os.Exit(1)
+		}
+
 		processBatchLabelOperation(issueIDs, label, "added", jsonOutput,
 			func(issueID, lbl string) error {
 				_, err := daemonClient.AddLabel(&rpc.LabelAddArgs{ID: issueID, Label: lbl})
@@ -217,8 +226,7 @@ var labelListCmd = &cobra.Command{
 			fmt.Printf("\n%s has no labels\n", issueID)
 			return
 		}
-		cyan := color.New(color.FgCyan).SprintFunc()
-		fmt.Printf("\n%s Labels for %s:\n", cyan("🏷"), issueID)
+		fmt.Printf("\n%s Labels for %s:\n", ui.RenderAccent("🏷"), issueID)
 		for _, label := range labels {
 			fmt.Printf("  - %s\n", label)
 		}
@@ -302,8 +310,7 @@ var labelListAllCmd = &cobra.Command{
 			outputJSON(result)
 			return
 		}
-		cyan := color.New(color.FgCyan).SprintFunc()
-		fmt.Printf("\n%s All labels (%d unique):\n", cyan("🏷"), len(labels))
+		fmt.Printf("\n%s All labels (%d unique):\n", ui.RenderAccent("🏷"), len(labels))
 		// Find longest label for alignment
 		maxLen := 0
 		for _, label := range labels {

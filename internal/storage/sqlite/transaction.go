@@ -306,7 +306,8 @@ func (t *sqliteTxStorage) GetIssue(ctx context.Context, id string) (*types.Issue
 		       created_at, updated_at, closed_at, external_ref,
 		       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason,
 		       deleted_at, deleted_by, delete_reason, original_type,
-		       sender, ephemeral, pinned
+		       sender, ephemeral, pinned, is_template,
+		       await_type, await_id, timeout_ns, waiters
 		FROM issues
 		WHERE id = ?
 	`, id)
@@ -600,7 +601,7 @@ func (t *sqliteTxStorage) AddDependency(ctx context.Context, dep *types.Dependen
 		return fmt.Errorf("invalid dependency type: %q (must be non-empty string, max 50 chars)", dep.Type)
 	}
 
-	// Validate that both issues exist
+	// Validate that source issue exists
 	issueExists, err := t.GetIssue(ctx, dep.IssueID)
 	if err != nil {
 		return fmt.Errorf("failed to check issue %s: %w", dep.IssueID, err)
@@ -609,24 +610,31 @@ func (t *sqliteTxStorage) AddDependency(ctx context.Context, dep *types.Dependen
 		return fmt.Errorf("issue %s not found", dep.IssueID)
 	}
 
-	dependsOnExists, err := t.GetIssue(ctx, dep.DependsOnID)
-	if err != nil {
-		return fmt.Errorf("failed to check dependency %s: %w", dep.DependsOnID, err)
-	}
-	if dependsOnExists == nil {
-		return fmt.Errorf("dependency target %s not found", dep.DependsOnID)
-	}
+	// External refs (external:<project>:<capability>) don't need target validation (bd-zmmy)
+	// They are resolved lazily at query time by CheckExternalDep
+	isExternalRef := strings.HasPrefix(dep.DependsOnID, "external:")
 
-	// Prevent self-dependency
-	if dep.IssueID == dep.DependsOnID {
-		return fmt.Errorf("issue cannot depend on itself")
-	}
+	var dependsOnExists *types.Issue
+	if !isExternalRef {
+		dependsOnExists, err = t.GetIssue(ctx, dep.DependsOnID)
+		if err != nil {
+			return fmt.Errorf("failed to check dependency %s: %w", dep.DependsOnID, err)
+		}
+		if dependsOnExists == nil {
+			return fmt.Errorf("dependency target %s not found", dep.DependsOnID)
+		}
 
-	// Validate parent-child dependency direction
-	if dep.Type == types.DepParentChild {
-		if issueExists.IssueType == types.TypeEpic && dependsOnExists.IssueType != types.TypeEpic {
-			return fmt.Errorf("invalid parent-child dependency: parent (%s) cannot depend on child (%s). Use: bd dep add %s %s --type parent-child",
-				dep.IssueID, dep.DependsOnID, dep.DependsOnID, dep.IssueID)
+		// Prevent self-dependency (only for local deps)
+		if dep.IssueID == dep.DependsOnID {
+			return fmt.Errorf("issue cannot depend on itself")
+		}
+
+		// Validate parent-child dependency direction (only for local deps)
+		if dep.Type == types.DepParentChild {
+			if issueExists.IssueType == types.TypeEpic && dependsOnExists.IssueType != types.TypeEpic {
+				return fmt.Errorf("invalid parent-child dependency: parent (%s) cannot depend on child (%s). Use: bd dep add %s %s --type parent-child",
+					dep.IssueID, dep.DependsOnID, dep.DependsOnID, dep.IssueID)
+			}
 		}
 	}
 
@@ -695,16 +703,18 @@ func (t *sqliteTxStorage) AddDependency(ctx context.Context, dep *types.Dependen
 		return fmt.Errorf("failed to record event: %w", err)
 	}
 
-	// Mark both issues as dirty
+	// Mark issues as dirty - for external refs, only mark the source issue
 	if err := markDirty(ctx, t.conn, dep.IssueID); err != nil {
 		return fmt.Errorf("failed to mark issue dirty: %w", err)
 	}
-	if err := markDirty(ctx, t.conn, dep.DependsOnID); err != nil {
-		return fmt.Errorf("failed to mark depends-on issue dirty: %w", err)
+	if !isExternalRef {
+		if err := markDirty(ctx, t.conn, dep.DependsOnID); err != nil {
+			return fmt.Errorf("failed to mark depends-on issue dirty: %w", err)
+		}
 	}
 
-	// Invalidate blocked cache for blocking dependencies (bd-1c4h)
-	if dep.Type == types.DepBlocks || dep.Type == types.DepParentChild {
+	// Invalidate blocked cache for blocking dependencies (bd-1c4h, bd-kzda)
+	if dep.Type.AffectsReadyWork() {
 		if err := t.parent.invalidateBlockedCache(ctx, t.conn); err != nil {
 			return fmt.Errorf("failed to invalidate blocked cache: %w", err)
 		}
@@ -721,10 +731,10 @@ func (t *sqliteTxStorage) RemoveDependency(ctx context.Context, issueID, depends
 		SELECT type FROM dependencies WHERE issue_id = ? AND depends_on_id = ?
 	`, issueID, dependsOnID).Scan(&depType)
 
-	// Store whether cache needs invalidation before deletion
+	// Store whether cache needs invalidation before deletion (bd-1c4h, bd-kzda)
 	needsCacheInvalidation := false
 	if err == nil {
-		needsCacheInvalidation = (depType == types.DepBlocks || depType == types.DepParentChild)
+		needsCacheInvalidation = depType.AffectsReadyWork()
 	}
 
 	result, err := t.conn.ExecContext(ctx, `
@@ -1071,10 +1081,10 @@ func (t *sqliteTxStorage) SearchIssues(ctx context.Context, query string, filter
 		whereClauses = append(whereClauses, fmt.Sprintf("id IN (%s)", strings.Join(placeholders, ", ")))
 	}
 
-	// Ephemeral filtering (bd-kwro.9)
-	if filter.Ephemeral != nil {
-		if *filter.Ephemeral {
-			whereClauses = append(whereClauses, "ephemeral = 1")
+	// Wisp filtering (bd-kwro.9)
+	if filter.Wisp != nil {
+		if *filter.Wisp {
+			whereClauses = append(whereClauses, "ephemeral = 1") // SQL column is still 'ephemeral'
 		} else {
 			whereClauses = append(whereClauses, "(ephemeral = 0 OR ephemeral IS NULL)")
 		}
@@ -1087,6 +1097,12 @@ func (t *sqliteTxStorage) SearchIssues(ctx context.Context, query string, filter
 		} else {
 			whereClauses = append(whereClauses, "(pinned = 0 OR pinned IS NULL)")
 		}
+	}
+
+	// Parent filtering (bd-yqhh): filter children by parent issue
+	if filter.ParentID != nil {
+		whereClauses = append(whereClauses, "id IN (SELECT issue_id FROM dependencies WHERE type = 'parent-child' AND depends_on_id = ?)")
+		args = append(args, *filter.ParentID)
 	}
 
 	whereSQL := ""
@@ -1107,7 +1123,8 @@ func (t *sqliteTxStorage) SearchIssues(ctx context.Context, query string, filter
 		       created_at, updated_at, closed_at, external_ref,
 		       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason,
 		       deleted_at, deleted_by, delete_reason, original_type,
-		       sender, ephemeral, pinned
+		       sender, ephemeral, pinned, is_template,
+		       await_type, await_id, timeout_ns, waiters
 		FROM issues
 		%s
 		ORDER BY priority ASC, created_at DESC
@@ -1149,9 +1166,16 @@ func scanIssueRow(row scanner) (*types.Issue, error) {
 	var originalType sql.NullString
 	// Messaging fields (bd-kwro)
 	var sender sql.NullString
-	var ephemeral sql.NullInt64
+	var wisp sql.NullInt64
 	// Pinned field (bd-7h5)
 	var pinned sql.NullInt64
+	// Template field (beads-1ra)
+	var isTemplate sql.NullInt64
+	// Gate fields (bd-udsi)
+	var awaitType sql.NullString
+	var awaitID sql.NullString
+	var timeoutNs sql.NullInt64
+	var waiters sql.NullString
 
 	err := row.Scan(
 		&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Design,
@@ -1160,7 +1184,8 @@ func scanIssueRow(row scanner) (*types.Issue, error) {
 		&issue.CreatedAt, &issue.UpdatedAt, &closedAt, &externalRef,
 		&issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo, &closeReason,
 		&deletedAt, &deletedBy, &deleteReason, &originalType,
-		&sender, &ephemeral, &pinned,
+		&sender, &wisp, &pinned, &isTemplate,
+		&awaitType, &awaitID, &timeoutNs, &waiters,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to scan issue: %w", err)
@@ -1211,12 +1236,29 @@ func scanIssueRow(row scanner) (*types.Issue, error) {
 	if sender.Valid {
 		issue.Sender = sender.String
 	}
-	if ephemeral.Valid && ephemeral.Int64 != 0 {
-		issue.Ephemeral = true
+	if wisp.Valid && wisp.Int64 != 0 {
+		issue.Wisp = true
 	}
 	// Pinned field (bd-7h5)
 	if pinned.Valid && pinned.Int64 != 0 {
 		issue.Pinned = true
+	}
+	// Template field (beads-1ra)
+	if isTemplate.Valid && isTemplate.Int64 != 0 {
+		issue.IsTemplate = true
+	}
+	// Gate fields (bd-udsi)
+	if awaitType.Valid {
+		issue.AwaitType = awaitType.String
+	}
+	if awaitID.Valid {
+		issue.AwaitID = awaitID.String
+	}
+	if timeoutNs.Valid {
+		issue.Timeout = time.Duration(timeoutNs.Int64)
+	}
+	if waiters.Valid && waiters.String != "" {
+		issue.Waiters = parseJSONStringArray(waiters.String)
 	}
 
 	return &issue, nil

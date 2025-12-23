@@ -43,6 +43,10 @@ var migrationsList = []Migration{
 	{"migrate_edge_fields", migrations.MigrateEdgeFields},
 	{"drop_edge_columns", migrations.MigrateDropEdgeColumns},
 	{"pinned_column", migrations.MigratePinnedColumn},
+	{"is_template_column", migrations.MigrateIsTemplateColumn},
+	{"remove_depends_on_fk", migrations.MigrateRemoveDependsOnFK},
+	{"additional_indexes", migrations.MigrateAdditionalIndexes},
+	{"gate_columns", migrations.MigrateGateColumns},
 }
 
 // MigrationInfo contains metadata about a migration for inspection
@@ -93,6 +97,10 @@ func getMigrationDescription(name string) string {
 		"migrate_edge_fields":          "Migrates existing issue fields (replies_to, relates_to, duplicate_of, superseded_by) to dependency edges (Decision 004 Phase 3)",
 		"drop_edge_columns":            "Drops deprecated edge columns (replies_to, relates_to, duplicate_of, superseded_by) from issues table (Decision 004 Phase 4)",
 		"pinned_column":                "Adds pinned column for persistent context markers (bd-7h5)",
+		"is_template_column":           "Adds is_template column for template molecules (beads-1ra)",
+		"remove_depends_on_fk":         "Removes FK constraint on depends_on_id to allow external references (bd-zmmy)",
+		"additional_indexes":           "Adds performance optimization indexes for common query patterns (bd-h0we)",
+		"gate_columns":                 "Adds gate columns (await_type, await_id, timeout_ns, waiters) for async coordination (bd-udsi)",
 	}
 	
 	if desc, ok := descriptions[name]; ok {
@@ -101,8 +109,36 @@ func getMigrationDescription(name string) string {
 	return "Unknown migration"
 }
 
-// RunMigrations executes all registered migrations in order with invariant checking
+// RunMigrations executes all registered migrations in order with invariant checking.
+// Uses EXCLUSIVE transaction to prevent race conditions when multiple processes
+// open the database simultaneously (GH#720).
 func RunMigrations(db *sql.DB) error {
+	// Disable foreign keys BEFORE starting the transaction.
+	// PRAGMA foreign_keys must be called when no transaction is active (SQLite limitation).
+	// Some migrations (022, 025) drop/recreate tables and need foreign keys off
+	// to prevent ON DELETE CASCADE from deleting related data.
+	_, err := db.Exec("PRAGMA foreign_keys = OFF")
+	if err != nil {
+		return fmt.Errorf("failed to disable foreign keys for migrations: %w", err)
+	}
+	defer func() { _, _ = db.Exec("PRAGMA foreign_keys = ON") }()
+
+	// Acquire EXCLUSIVE lock to serialize migrations across processes.
+	// Without this, parallel processes can race on check-then-modify operations
+	// (e.g., checking if a column exists then adding it), causing "duplicate column" errors.
+	_, err = db.Exec("BEGIN EXCLUSIVE")
+	if err != nil {
+		return fmt.Errorf("failed to acquire exclusive lock for migrations: %w", err)
+	}
+
+	// Ensure we release the lock on any exit path
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = db.Exec("ROLLBACK")
+		}
+	}()
+
 	snapshot, err := captureSnapshot(db)
 	if err != nil {
 		return fmt.Errorf("failed to capture pre-migration snapshot: %w", err)
@@ -117,6 +153,12 @@ func RunMigrations(db *sql.DB) error {
 	if err := verifyInvariants(db, snapshot); err != nil {
 		return fmt.Errorf("post-migration validation failed: %w", err)
 	}
+
+	// Commit the transaction
+	if _, err := db.Exec("COMMIT"); err != nil {
+		return fmt.Errorf("failed to commit migrations: %w", err)
+	}
+	committed = true
 
 	return nil
 }

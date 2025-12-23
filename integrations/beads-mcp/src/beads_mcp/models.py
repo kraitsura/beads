@@ -1,32 +1,15 @@
 """Pydantic models for beads issue tracker types."""
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Literal, Any
 
 from pydantic import BaseModel, Field, field_validator
 
 # Type aliases for issue statuses, types, and dependencies
-IssueStatus = Literal["open", "in_progress", "blocked", "closed"]
+IssueStatus = Literal["open", "in_progress", "blocked", "deferred", "closed"]
 IssueType = Literal["bug", "feature", "task", "epic", "chore"]
 DependencyType = Literal["blocks", "related", "parent-child", "discovered-from"]
-
-
-class CompactModel(BaseModel):
-    """Base model that excludes None values from serialization.
-
-    This reduces token usage in MCP responses by not outputting
-    meaningless `"field": null` entries.
-    """
-
-    def model_dump(self, **kwargs: Any) -> dict[str, Any]:
-        """Override to exclude None by default."""
-        kwargs.setdefault("exclude_none", True)
-        return super().model_dump(**kwargs)
-
-    def model_dump_json(self, **kwargs: Any) -> str:
-        """Override to exclude None by default."""
-        kwargs.setdefault("exclude_none", True)
-        return super().model_dump_json(**kwargs)
+OperationAction = Literal["created", "updated", "closed", "reopened"]
 
 
 # =============================================================================
@@ -37,7 +20,7 @@ class CompactModel(BaseModel):
 
 class IssueMinimal(BaseModel):
     """Minimal issue model for list views (~80% smaller than full Issue).
-
+    
     Use this for ready_work, list_issues, and other bulk operations.
     For full details including dependencies, use Issue model via show().
     """
@@ -72,11 +55,47 @@ class CompactedResult(BaseModel):
     hint: str = "Use show(issue_id) for full issue details"
 
 
+class BriefIssue(BaseModel):
+    """Ultra-minimal issue for scanning (4 fields).
+
+    Use for quick scans where only identification + priority needed.
+    ~95% smaller than full Issue.
+    """
+    id: str
+    title: str
+    status: IssueStatus
+    priority: int = Field(ge=0, le=4)
+
+
+class BriefDep(BaseModel):
+    """Brief dependency for overview (5 fields).
+
+    Use with brief_deps=True to get full issue but compact dependencies.
+    ~90% smaller than full LinkedIssue.
+    """
+    id: str
+    title: str
+    status: IssueStatus
+    priority: int = Field(ge=0, le=4)
+    dependency_type: DependencyType | None = None
+
+
+class OperationResult(BaseModel):
+    """Minimal confirmation for write operations.
+
+    Default response for create/update/close/reopen when verbose=False.
+    ~97% smaller than returning full Issue object.
+    """
+    id: str
+    action: OperationAction
+    message: str | None = None
+
+
 # =============================================================================
 # ORIGINAL MODELS (unchanged for backward compatibility)
 # =============================================================================
 
-class IssueBase(CompactModel):
+class IssueBase(BaseModel):
     """Base issue model with shared fields."""
 
     id: str
@@ -119,57 +138,6 @@ class Issue(IssueBase):
     dependents: list[LinkedIssue] = Field(default_factory=list)
 
 
-class BriefIssue(BaseModel):
-    """Minimal issue representation for scanning/identification.
-
-    Used when `brief=True` to reduce context size.
-    """
-    id: str
-    title: str
-    status: IssueStatus
-
-
-class BriefDep(CompactModel):
-    """Minimal dependency representation for show() with brief_deps=True.
-
-    Includes dependency_type to understand the relationship.
-    ~50 bytes per dep vs ~1-2KB for full Issue object.
-    """
-
-    id: str
-    title: str
-    status: IssueStatus
-    dependency_type: str | None = None
-
-
-class BriefTreeNode(BaseModel):
-    """Minimal tree node for dependency visualization.
-
-    Used when `brief=True` in dep(action="tree") to reduce context size.
-    ~30 bytes per node vs ~1-2KB for full TreeNode.
-    """
-    id: str
-    title: str
-    status: IssueStatus
-    depth: int
-    truncated: bool = False
-
-
-class OperationResult(CompactModel):
-    """Brief confirmation for write operations.
-
-    Returned by default (verbose=False) to minimize context usage.
-    Use verbose=True to get full object details.
-
-    Format: {"id": "bd-1", "action": "created"} or with message for suggest_next.
-    Errors are raised as exceptions, not returned here.
-    """
-
-    id: str  # Issue ID affected (or "bd-1->bd-2" for deps)
-    action: str  # "created", "updated", "closed", "reopened", "dep_added", etc.
-    message: str | None = None  # Optional details (e.g., unblocked issues)
-
-
 class Dependency(BaseModel):
     """Dependency relationship model."""
 
@@ -207,11 +175,6 @@ class UpdateIssueParams(BaseModel):
     acceptance_criteria: str | None = None
     notes: str | None = None
     external_ref: str | None = None
-    # Label operations
-    add_labels: list[str] = Field(default_factory=list)  # Add labels without removing existing
-    remove_labels: list[str] = Field(default_factory=list)  # Remove specific labels
-    # Time estimate
-    estimated_minutes: int | None = None
 
 
 class CloseIssueParams(BaseModel):
@@ -236,50 +199,16 @@ class AddDependencyParams(BaseModel):
     dep_type: DependencyType = "blocks"
 
 
-class RemoveDependencyParams(BaseModel):
-    """Parameters for removing a dependency."""
-
-    issue_id: str
-    depends_on_id: str
-    dep_type: DependencyType | None = None  # Optional: remove specific type
-
-
-class DepTreeParams(BaseModel):
-    """Parameters for getting dependency tree."""
-
-    issue_id: str
-    max_depth: int = Field(default=3, ge=1, le=10)
-    reverse: bool = Field(default=True)  # True=show dependents (children), False=show dependencies (blockers)
-
-
-class CommentAddParams(BaseModel):
-    """Parameters for adding a comment."""
-
-    issue_id: str
-    text: str
-    author: str | None = None  # Defaults to BEADS_ACTOR
-
-
-class CommentListParams(BaseModel):
-    """Parameters for listing comments."""
-
-    issue_id: str
-
-
-SortPolicy = Literal["hybrid", "priority", "oldest"]
-
-
 class ReadyWorkParams(BaseModel):
     """Parameters for querying ready work."""
 
     limit: int = Field(default=10, ge=1, le=100)
     priority: int | None = Field(default=None, ge=0, le=4)
     assignee: str | None = None
-    # Scoping parameters
-    labels: list[str] = Field(default_factory=list)  # AND semantics
-    labels_any: list[str] = Field(default_factory=list)  # OR semantics
-    unassigned: bool = False  # Filter for issues with no assignee
-    sort_policy: SortPolicy | None = None  # hybrid, priority, or oldest
+    labels: list[str] | None = None  # AND: must have ALL labels
+    labels_any: list[str] | None = None  # OR: must have at least one
+    unassigned: bool = False  # Filter to only unassigned issues
+    sort_policy: str | None = None  # hybrid, priority, oldest
 
 
 class ListIssuesParams(BaseModel):
@@ -289,12 +218,11 @@ class ListIssuesParams(BaseModel):
     priority: int | None = Field(default=None, ge=0, le=4)
     issue_type: IssueType | None = None
     assignee: str | None = None
+    labels: list[str] | None = None  # AND: must have ALL labels
+    labels_any: list[str] | None = None  # OR: must have at least one
+    query: str | None = None  # Search in title (case-insensitive)
+    unassigned: bool = False  # Filter to only unassigned issues
     limit: int = Field(default=20, ge=1, le=100)  # Reduced to avoid MCP buffer overflow
-    # Scoping parameters
-    labels: list[str] = Field(default_factory=list)  # AND semantics: must have ALL
-    labels_any: list[str] = Field(default_factory=list)  # OR semantics: must have at least one
-    query: str | None = None  # Free-form search on title/description/id
-    unassigned: bool = False  # Filter for issues with no assignee
 
 
 class ShowIssueParams(BaseModel):

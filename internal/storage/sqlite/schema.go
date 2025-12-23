@@ -36,6 +36,8 @@ CREATE TABLE IF NOT EXISTS issues (
     ephemeral INTEGER DEFAULT 0,
     -- Pinned field (bd-7h5)
     pinned INTEGER DEFAULT 0,
+    -- Template field (beads-1ra)
+    is_template INTEGER DEFAULT 0,
     -- NOTE: replies_to, relates_to, duplicate_of, superseded_by removed per Decision 004
     -- These relationships are now stored in the dependencies table
     CHECK ((status = 'closed') = (closed_at IS NOT NULL))
@@ -245,7 +247,7 @@ WITH RECURSIVE
     FROM dependencies d
     JOIN issues blocker ON d.depends_on_id = blocker.id
     WHERE d.type = 'blocks'
-      AND blocker.status IN ('open', 'in_progress', 'blocked')
+      AND blocker.status IN ('open', 'in_progress', 'blocked', 'deferred')
   ),
   -- Propagate blockage to all descendants via parent-child
   blocked_transitively AS (
@@ -275,8 +277,8 @@ SELECT
 FROM issues i
 JOIN dependencies d ON i.id = d.issue_id
 JOIN issues blocker ON d.depends_on_id = blocker.id
-WHERE i.status IN ('open', 'in_progress', 'blocked')
+WHERE i.status IN ('open', 'in_progress', 'blocked', 'deferred')
   AND d.type = 'blocks'
-  AND blocker.status IN ('open', 'in_progress', 'blocked')
+  AND blocker.status IN ('open', 'in_progress', 'blocked', 'deferred')
 GROUP BY i.id;
 `

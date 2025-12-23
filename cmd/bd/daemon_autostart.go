@@ -12,7 +12,18 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/rpc"
+	"github.com/steveyegge/beads/internal/ui"
 )
+
+// daemonShutdownTimeout is how long to wait for graceful shutdown before force killing.
+// 1 second is sufficient - if daemon hasn't stopped by then, it's likely hung.
+const daemonShutdownTimeout = 1 * time.Second
+
+// daemonShutdownPollInterval is how often to check if daemon has stopped.
+const daemonShutdownPollInterval = 100 * time.Millisecond
+
+// daemonShutdownAttempts is the number of poll attempts before force kill.
+const daemonShutdownAttempts = int(daemonShutdownTimeout / daemonShutdownPollInterval)
 
 // Daemon start failure tracking for exponential backoff
 var (
@@ -71,9 +82,9 @@ func restartDaemonForVersionMismatch() bool {
 			return false
 		}
 
-		// Wait for daemon to stop (up to 5 seconds)
-		for i := 0; i < 50; i++ {
-			time.Sleep(100 * time.Millisecond)
+		// Wait for daemon to stop, then force kill
+		for i := 0; i < daemonShutdownAttempts; i++ {
+			time.Sleep(daemonShutdownPollInterval)
 			if isRunning, _ := isDaemonRunning(pidFile); !isRunning {
 				debug.Logf("old daemon stopped successfully")
 				break
@@ -135,6 +146,8 @@ func restartDaemonForVersionMismatch() bool {
 	}
 
 	debug.Logf("new daemon failed to become ready")
+	fmt.Fprintf(os.Stderr, "%s Daemon restart timed out (>5s). Running in direct mode.\n", ui.RenderWarn("Warning:"))
+	fmt.Fprintf(os.Stderr, "  %s Run 'bd doctor' to diagnose daemon issues\n", ui.RenderMuted("Hint:"))
 	return false
 }
 
@@ -211,7 +224,7 @@ func acquireStartLock(lockPath, socketPath string) bool {
 	}
 
 	_, _ = fmt.Fprintf(lockFile, "%d\n", os.Getpid())
-	_ = lockFile.Close()
+	_ = lockFile.Close() // Best-effort close during startup
 	return true
 }
 
@@ -244,9 +257,9 @@ func handleExistingSocket(socketPath string) bool {
 	}
 
 	debugLog("socket is stale, cleaning up")
-	_ = os.Remove(socketPath)
+	_ = os.Remove(socketPath) // Best-effort cleanup, file may not exist
 	if pidFile != "" {
-		_ = os.Remove(pidFile)
+		_ = os.Remove(pidFile) // Best-effort cleanup, file may not exist
 	}
 	return false
 }
@@ -286,6 +299,9 @@ func startDaemonProcess(socketPath string) bool {
 
 	recordDaemonStartFailure()
 	debugLog("daemon socket not ready after 5 seconds")
+	// Emit visible warning so user understands why command was slow
+	fmt.Fprintf(os.Stderr, "%s Daemon took too long to start (>5s). Running in direct mode.\n", ui.RenderWarn("Warning:"))
+	fmt.Fprintf(os.Stderr, "  %s Run 'bd doctor' to diagnose daemon issues\n", ui.RenderMuted("Hint:"))
 	return false
 }
 
@@ -337,7 +353,7 @@ func canDialSocket(socketPath string, timeout time.Duration) bool {
 	if err != nil || client == nil {
 		return false
 	}
-	_ = client.Close()
+	_ = client.Close() // Best-effort close after health check
 	return true
 }
 

@@ -91,6 +91,16 @@ func TryConnectWithTimeout(socketPath string, dialTimeout time.Duration) (*Clien
 	if err != nil {
 		debug.Logf("failed to connect to RPC endpoint: %v", err)
 		rpcDebugLog("dial failed after %v: %v", dialDuration, err)
+
+		// Fast-fail: socket exists but dial failed - check if daemon actually alive
+		// If lock is not held, daemon crashed and left stale socket - clean up immediately
+		beadsDir := filepath.Dir(socketPath)
+		running, _ := lockfile.TryDaemonLock(beadsDir)
+		if !running {
+			rpcDebugLog("daemon not running (lock free) - cleaning up stale socket")
+			cleanupStaleDaemonArtifacts(beadsDir)
+			_ = os.Remove(socketPath) // Also remove stale socket
+		}
 		return nil, nil
 	}
 	
@@ -393,6 +403,33 @@ func (c *Client) Export(args *ExportArgs) (*Response, error) {
 // EpicStatus gets epic completion status via the daemon
 func (c *Client) EpicStatus(args *EpicStatusArgs) (*Response, error) {
 	return c.Execute(OpEpicStatus, args)
+}
+
+// Gate operations (bd-likt)
+
+// GateCreate creates a gate via the daemon
+func (c *Client) GateCreate(args *GateCreateArgs) (*Response, error) {
+	return c.Execute(OpGateCreate, args)
+}
+
+// GateList lists gates via the daemon
+func (c *Client) GateList(args *GateListArgs) (*Response, error) {
+	return c.Execute(OpGateList, args)
+}
+
+// GateShow shows a gate via the daemon
+func (c *Client) GateShow(args *GateShowArgs) (*Response, error) {
+	return c.Execute(OpGateShow, args)
+}
+
+// GateClose closes a gate via the daemon
+func (c *Client) GateClose(args *GateCloseArgs) (*Response, error) {
+	return c.Execute(OpGateClose, args)
+}
+
+// GateWait adds waiters to a gate via the daemon
+func (c *Client) GateWait(args *GateWaitArgs) (*Response, error) {
+	return c.Execute(OpGateWait, args)
 }
 
 // cleanupStaleDaemonArtifacts removes stale daemon.pid file when socket is missing and lock is free.

@@ -1,21 +1,34 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"time"
 
-	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 )
+
+// CleanupEmptyResponse is returned when there are no closed issues to delete
+type CleanupEmptyResponse struct {
+	DeletedCount int    `json:"deleted_count"`
+	Message      string `json:"message"`
+	Filter       string `json:"filter,omitempty"`
+	Wisp         bool   `json:"wisp,omitempty"`
+}
 
 // Hard delete mode: bypass tombstone TTL safety, use --older-than days directly
 
+// showCleanupDeprecationHint shows a hint about bd doctor --fix (bd-bqcc)
+func showCleanupDeprecationHint() {
+	fmt.Fprintln(os.Stderr, ui.RenderMuted("💡 Tip: 'bd doctor --fix' can now cleanup stale issues and prune tombstones"))
+}
+
 var cleanupCmd = &cobra.Command{
-	Use:   "cleanup",
-	Short: "Delete closed issues and prune expired tombstones",
+	Use:     "cleanup",
+	GroupID: "maint",
+	Short:   "Delete closed issues and prune expired tombstones",
 	Long: `Delete closed issues and prune expired tombstones to reduce database size.
 
 This command:
@@ -42,8 +55,8 @@ Delete all closed issues and prune tombstones:
 Delete issues closed more than 30 days ago:
   bd cleanup --older-than 30 --force
 
-Delete only closed ephemeral issues (transient messages):
-  bd cleanup --ephemeral --force
+Delete only closed wisps (transient molecules):
+  bd cleanup --wisp --force
 
 Preview what would be deleted/pruned:
   bd cleanup --dry-run
@@ -67,7 +80,7 @@ SEE ALSO:
 		cascade, _ := cmd.Flags().GetBool("cascade")
 		olderThanDays, _ := cmd.Flags().GetInt("older-than")
 		hardDelete, _ := cmd.Flags().GetBool("hard")
-		ephemeralOnly, _ := cmd.Flags().GetBool("ephemeral")
+		wispOnly, _ := cmd.Flags().GetBool("wisp")
 
 		// Calculate custom TTL for --hard mode
 		// When --hard is set, use --older-than days as the tombstone TTL cutoff
@@ -82,7 +95,7 @@ SEE ALSO:
 				customTTL = -1
 			}
 			if !jsonOutput && !dryRun {
-				fmt.Println(color.YellowString("⚠️  HARD DELETE MODE: Bypassing tombstone TTL safety"))
+				fmt.Println(ui.RenderWarn("⚠️  HARD DELETE MODE: Bypassing tombstone TTL safety"))
 			}
 		}
 
@@ -113,10 +126,10 @@ SEE ALSO:
 			filter.ClosedBefore = &cutoffTime
 		}
 
-		// Add ephemeral filter if specified (bd-kwro.9)
-		if ephemeralOnly {
-			ephemeralTrue := true
-			filter.Ephemeral = &ephemeralTrue
+		// Add wisp filter if specified (bd-kwro.9)
+		if wispOnly {
+			wispTrue := true
+			filter.Wisp = &wispTrue
 		}
 
 		// Get all closed issues matching filter
@@ -126,26 +139,41 @@ SEE ALSO:
 			os.Exit(1)
 		}
 
+		// Filter out pinned issues - they are protected from cleanup (bd-b2k)
+		pinnedCount := 0
+		filteredIssues := make([]*types.Issue, 0, len(closedIssues))
+		for _, issue := range closedIssues {
+			if issue.Pinned {
+				pinnedCount++
+				continue
+			}
+			filteredIssues = append(filteredIssues, issue)
+		}
+		closedIssues = filteredIssues
+
+		if pinnedCount > 0 && !jsonOutput {
+			fmt.Printf("Skipping %d pinned issue(s) (protected from cleanup)\n", pinnedCount)
+		}
+
 		if len(closedIssues) == 0 {
 			if jsonOutput {
-				result := map[string]interface{}{
-					"deleted_count": 0,
-					"message":       "No closed issues to delete",
+				result := CleanupEmptyResponse{
+					DeletedCount: 0,
+					Message:      "No closed issues to delete",
 				}
 				if olderThanDays > 0 {
-					result["filter"] = fmt.Sprintf("older than %d days", olderThanDays)
+					result.Filter = fmt.Sprintf("older than %d days", olderThanDays)
 				}
-				if ephemeralOnly {
-					result["ephemeral"] = true
+				if wispOnly {
+					result.Wisp = true
 				}
-				output, _ := json.MarshalIndent(result, "", "  ")
-				fmt.Println(string(output))
+				outputJSON(result)
 			} else {
 				msg := "No closed issues to delete"
-				if ephemeralOnly && olderThanDays > 0 {
-					msg = fmt.Sprintf("No closed ephemeral issues older than %d days to delete", olderThanDays)
-				} else if ephemeralOnly {
-					msg = "No closed ephemeral issues to delete"
+				if wispOnly && olderThanDays > 0 {
+					msg = fmt.Sprintf("No closed wisps older than %d days to delete", olderThanDays)
+				} else if wispOnly {
+					msg = "No closed wisps to delete"
 				} else if olderThanDays > 0 {
 					msg = fmt.Sprintf("No closed issues older than %d days to delete", olderThanDays)
 				}
@@ -163,8 +191,8 @@ SEE ALSO:
 		// Show preview
 		if !force && !dryRun {
 			issueType := "closed"
-			if ephemeralOnly {
-				issueType = "closed ephemeral"
+			if wispOnly {
+				issueType = "closed wisp"
 			}
 			fmt.Fprintf(os.Stderr, "Would delete %d %s issue(s). Use --force to confirm or --dry-run to preview.\n", len(issueIDs), issueType)
 			os.Exit(1)
@@ -172,8 +200,8 @@ SEE ALSO:
 
 		if !jsonOutput {
 			issueType := "closed"
-			if ephemeralOnly {
-				issueType = "closed ephemeral"
+			if wispOnly {
+				issueType = "closed wisp"
 			}
 			if olderThanDays > 0 {
 				fmt.Printf("Found %d %s issue(s) older than %d days\n", len(closedIssues), issueType, olderThanDays)
@@ -181,7 +209,7 @@ SEE ALSO:
 				fmt.Printf("Found %d %s issue(s)\n", len(closedIssues), issueType)
 			}
 			if dryRun {
-				fmt.Println(color.YellowString("DRY RUN - no changes will be made"))
+				fmt.Println(ui.RenderWarn("DRY RUN - no changes will be made"))
 			}
 			fmt.Println()
 		}
@@ -219,15 +247,19 @@ SEE ALSO:
 				}
 			} else if tombstoneResult != nil && tombstoneResult.PrunedCount > 0 {
 				if !jsonOutput {
-					green := color.New(color.FgGreen).SprintFunc()
 					ttlMsg := fmt.Sprintf("older than %d days", tombstoneResult.TTLDays)
 					if hardDelete && olderThanDays == 0 {
 						ttlMsg = "all tombstones (--hard mode)"
 					}
 					fmt.Printf("\n%s Pruned %d expired tombstone(s) (%s)\n",
-						green("✓"), tombstoneResult.PrunedCount, ttlMsg)
+						ui.RenderPass("✓"), tombstoneResult.PrunedCount, ttlMsg)
 				}
 			}
+		}
+
+		// bd-bqcc: Show hint about doctor --fix consolidation
+		if !jsonOutput {
+			showCleanupDeprecationHint()
 		}
 	},
 }
@@ -238,6 +270,6 @@ func init() {
 	cleanupCmd.Flags().Bool("cascade", false, "Recursively delete all dependent issues")
 	cleanupCmd.Flags().Int("older-than", 0, "Only delete issues closed more than N days ago (0 = all closed issues)")
 	cleanupCmd.Flags().Bool("hard", false, "Bypass tombstone TTL safety; use --older-than days as cutoff")
-	cleanupCmd.Flags().Bool("ephemeral", false, "Only delete closed ephemeral issues (transient messages)")
+	cleanupCmd.Flags().Bool("wisp", false, "Only delete closed wisps (transient molecules)")
 	rootCmd.AddCommand(cleanupCmd)
 }

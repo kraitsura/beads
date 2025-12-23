@@ -1,13 +1,14 @@
 package main
 
 import (
+	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -111,8 +112,9 @@ func validateExportPath(path string) error {
 }
 
 var exportCmd = &cobra.Command{
-	Use:   "export",
-	Short: "Export issues to JSONL format",
+	Use:     "export",
+	GroupID: "sync",
+	Short:   "Export issues to JSONL format",
 	Long: `Export all issues to JSON Lines format (one JSON object per line).
 Issues are sorted by ID for consistent diffs.
 
@@ -315,7 +317,7 @@ Examples:
 					len(jsonlIDs), len(issues), len(missingIDs))
 				
 				if len(missingIDs) > 0 {
-					sort.Strings(missingIDs)
+					slices.Sort(missingIDs)
 					fmt.Fprintf(os.Stderr, "Error: refusing to export stale database that would lose issues\n")
 					fmt.Fprintf(os.Stderr, "  Database has %d issues\n", len(issues))
 					fmt.Fprintf(os.Stderr, "  JSONL has %d issues\n", len(jsonlIDs))
@@ -345,9 +347,19 @@ Examples:
 			}
 		}
 
+		// Filter out wisps - they should never be exported to JSONL (bd-687g)
+		// Wisps exist only in SQLite and are shared via .beads/redirect, not JSONL.
+		filtered := make([]*types.Issue, 0, len(issues))
+		for _, issue := range issues {
+			if !issue.Wisp {
+				filtered = append(filtered, issue)
+			}
+		}
+		issues = filtered
+
 		// Sort by ID for consistent output
-		sort.Slice(issues, func(i, j int) bool {
-			return issues[i].ID < issues[j].ID
+		slices.SortFunc(issues, func(a, b *types.Issue) int {
+			return cmp.Compare(a.ID, b.ID)
 		})
 
 		// Populate dependencies for all issues in one query (avoids N+1 problem)
@@ -525,7 +537,7 @@ func init() {
 
 	// Filter flags
 	exportCmd.Flags().StringP("assignee", "a", "", "Filter by assignee")
-	exportCmd.Flags().StringP("type", "t", "", "Filter by type (bug, feature, task, epic, chore)")
+	exportCmd.Flags().StringP("type", "t", "", "Filter by type (bug, feature, task, epic, chore, merge-request, molecule, gate)")
 	exportCmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL)")
 	exportCmd.Flags().StringSlice("label-any", []string{}, "Filter by labels (OR: must have AT LEAST ONE)")
 

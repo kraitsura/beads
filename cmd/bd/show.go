@@ -6,24 +6,25 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"sort"
+	"slices"
 	"strings"
 
-	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
 	"github.com/steveyegge/beads/internal/validation"
 )
 
 var showCmd = &cobra.Command{
-	Use:   "show [id...]",
-	Short: "Show issue details",
-	Args:  cobra.MinimumNArgs(1),
+	Use:     "show [id...]",
+	GroupID: "issues",
+	Short:   "Show issue details",
+	Args:    cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		jsonOutput, _ := cmd.Flags().GetBool("json")
 		showThread, _ := cmd.Flags().GetBool("thread")
@@ -118,8 +119,6 @@ var showCmd = &cobra.Command{
 					}
 					issue := &details.Issue
 
-					cyan := color.New(color.FgCyan).SprintFunc()
-
 					// Format output (same as direct mode below)
 					tierEmoji := ""
 					statusSuffix := ""
@@ -132,7 +131,7 @@ var showCmd = &cobra.Command{
 						statusSuffix = " (compacted L2)"
 					}
 
-					fmt.Printf("\n%s: %s%s\n", cyan(issue.ID), issue.Title, tierEmoji)
+					fmt.Printf("\n%s: %s%s\n", ui.RenderAccent(issue.ID), issue.Title, tierEmoji)
 					fmt.Printf("Status: %s%s\n", issue.Status, statusSuffix)
 					if issue.CloseReason != "" {
 						fmt.Printf("Close reason: %s\n", issue.CloseReason)
@@ -302,8 +301,6 @@ var showCmd = &cobra.Command{
 				fmt.Println("\n" + strings.Repeat("─", 60))
 			}
 
-			cyan := color.New(color.FgCyan).SprintFunc()
-
 			// Add compaction emoji to title line
 			tierEmoji := ""
 			statusSuffix := ""
@@ -316,7 +313,7 @@ var showCmd = &cobra.Command{
 				statusSuffix = " (compacted L2)"
 			}
 
-			fmt.Printf("\n%s: %s%s\n", cyan(issue.ID), issue.Title, tierEmoji)
+			fmt.Printf("\n%s: %s%s\n", ui.RenderAccent(issue.ID), issue.Title, tierEmoji)
 			fmt.Printf("Status: %s%s\n", issue.Status, statusSuffix)
 			if issue.CloseReason != "" {
 				fmt.Printf("Close reason: %s\n", issue.CloseReason)
@@ -469,9 +466,10 @@ var showCmd = &cobra.Command{
 }
 
 var updateCmd = &cobra.Command{
-	Use:   "update [id...]",
-	Short: "Update one or more issues",
-	Args:  cobra.MinimumNArgs(1),
+	Use:     "update [id...]",
+	GroupID: "issues",
+	Short:   "Update one or more issues",
+	Args:    cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		CheckReadonly("update")
 		jsonOutput, _ := cmd.Flags().GetBool("json")
@@ -535,7 +533,7 @@ var updateCmd = &cobra.Command{
 			issueType, _ := cmd.Flags().GetString("type")
 			// Validate issue type
 			if !types.IssueType(issueType).IsValid() {
-				fmt.Fprintf(os.Stderr, "Error: invalid issue type %q. Valid types: bug, feature, task, epic, chore\n", issueType)
+				fmt.Fprintf(os.Stderr, "Error: invalid issue type %q. Valid types: bug, feature, task, epic, chore, merge-request, molecule, gate\n", issueType)
 				os.Exit(1)
 			}
 			updates["issue_type"] = issueType
@@ -665,8 +663,7 @@ var updateCmd = &cobra.Command{
 					}
 				}
 				if !jsonOutput {
-					green := color.New(color.FgGreen).SprintFunc()
-					fmt.Printf("%s Updated issue: %s\n", green("✓"), id)
+					fmt.Printf("%s Updated issue: %s\n", ui.RenderPass("✓"), id)
 				}
 			}
 
@@ -679,6 +676,17 @@ var updateCmd = &cobra.Command{
 		// Direct mode
 		updatedIssues := []*types.Issue{}
 		for _, id := range resolvedIDs {
+			// Check if issue is a template (beads-1ra): templates are read-only
+			issue, err := store.GetIssue(ctx, id)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error getting %s: %v\n", id, err)
+				continue
+			}
+			if issue != nil && issue.IsTemplate {
+				fmt.Fprintf(os.Stderr, "Error: cannot update template %s: templates are read-only; use 'bd molecule instantiate' to create a work item\n", id)
+				continue
+			}
+
 			// Apply regular field updates if any
 			regularUpdates := make(map[string]interface{})
 			for k, v := range updates {
@@ -739,18 +747,17 @@ var updateCmd = &cobra.Command{
 			}
 
 			// Run update hook (bd-kwro.8)
-			issue, _ := store.GetIssue(ctx, id)
-			if issue != nil && hookRunner != nil {
-				hookRunner.Run(hooks.EventUpdate, issue)
+			updatedIssue, _ := store.GetIssue(ctx, id)
+			if updatedIssue != nil && hookRunner != nil {
+				hookRunner.Run(hooks.EventUpdate, updatedIssue)
 			}
 
 			if jsonOutput {
-				if issue != nil {
-					updatedIssues = append(updatedIssues, issue)
+				if updatedIssue != nil {
+					updatedIssues = append(updatedIssues, updatedIssue)
 				}
 			} else {
-				green := color.New(color.FgGreen).SprintFunc()
-				fmt.Printf("%s Updated issue: %s\n", green("✓"), id)
+				fmt.Printf("%s Updated issue: %s\n", ui.RenderPass("✓"), id)
 			}
 		}
 
@@ -766,8 +773,9 @@ var updateCmd = &cobra.Command{
 }
 
 var editCmd = &cobra.Command{
-	Use:   "edit [id]",
-	Short: "Edit an issue field in $EDITOR",
+	Use:     "edit [id]",
+	GroupID: "issues",
+	Short:   "Edit an issue field in $EDITOR",
 	Long: `Edit an issue field using your configured $EDITOR.
 
 By default, edits the description. Use flags to edit other fields.
@@ -957,26 +965,38 @@ Examples:
 			markDirtyAndScheduleFlush()
 		}
 
-		green := color.New(color.FgGreen).SprintFunc()
 		fieldName := strings.ReplaceAll(fieldToEdit, "_", " ")
-		fmt.Printf("%s Updated %s for issue: %s\n", green("✓"), fieldName, id)
+		fmt.Printf("%s Updated %s for issue: %s\n", ui.RenderPass("✓"), fieldName, id)
 	},
 }
 
 var closeCmd = &cobra.Command{
-	Use:   "close [id...]",
-	Short: "Close one or more issues",
-	Args:  cobra.MinimumNArgs(1),
+	Use:     "close [id...]",
+	GroupID: "issues",
+	Short:   "Close one or more issues",
+	Args:    cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		CheckReadonly("close")
 		reason, _ := cmd.Flags().GetString("reason")
+		// Check --resolution alias if --reason not provided
+		if reason == "" {
+			reason, _ = cmd.Flags().GetString("resolution")
+		}
 		if reason == "" {
 			reason = "Closed"
 		}
 		jsonOutput, _ := cmd.Flags().GetBool("json")
 		force, _ := cmd.Flags().GetBool("force")
+		continueFlag, _ := cmd.Flags().GetBool("continue")
+		noAuto, _ := cmd.Flags().GetBool("no-auto")
 
 		ctx := rootCtx
+
+		// --continue only works with a single issue
+		if continueFlag && len(args) > 1 {
+			fmt.Fprintf(os.Stderr, "Error: --continue only works when closing a single issue\n")
+			os.Exit(1)
+		}
 
 		// Resolve partial IDs first
 		var resolvedIDs []string
@@ -1008,17 +1028,21 @@ var closeCmd = &cobra.Command{
 		if daemonClient != nil {
 			closedIssues := []*types.Issue{}
 			for _, id := range resolvedIDs {
-				// Check if issue is pinned (bd-6v2)
-				if !force {
-					showArgs := &rpc.ShowArgs{ID: id}
-					showResp, showErr := daemonClient.Show(showArgs)
-					if showErr == nil {
-						var issue types.Issue
-						if json.Unmarshal(showResp.Data, &issue) == nil {
-							if issue.Status == types.StatusPinned {
-								fmt.Fprintf(os.Stderr, "Error: cannot close pinned issue %s (use --force to override)\n", id)
-								continue
-							}
+				// Get issue for template and pinned checks
+				showArgs := &rpc.ShowArgs{ID: id}
+				showResp, showErr := daemonClient.Show(showArgs)
+				if showErr == nil {
+					var issue types.Issue
+					if json.Unmarshal(showResp.Data, &issue) == nil {
+						// Check if issue is a template (beads-1ra): templates are read-only
+						if issue.IsTemplate {
+							fmt.Fprintf(os.Stderr, "Error: cannot close template %s: templates are read-only\n", id)
+							continue
+						}
+						// Check if issue is pinned (bd-6v2)
+						if !force && issue.Status == types.StatusPinned {
+							fmt.Fprintf(os.Stderr, "Error: cannot close pinned issue %s (use --force to override)\n", id)
+							continue
 						}
 					}
 				}
@@ -1039,14 +1063,22 @@ var closeCmd = &cobra.Command{
 					if hookRunner != nil {
 						hookRunner.Run(hooks.EventClose, &issue)
 					}
+					// Run config-based close hooks (bd-g4b4)
+					hooks.RunConfigCloseHooks(ctx, &issue)
 					if jsonOutput {
 						closedIssues = append(closedIssues, &issue)
 					}
 				}
 				if !jsonOutput {
-					green := color.New(color.FgGreen).SprintFunc()
-					fmt.Printf("%s Closed %s: %s\n", green("✓"), id, reason)
+					fmt.Printf("%s Closed %s: %s\n", ui.RenderPass("✓"), id, reason)
 				}
+			}
+
+			// Handle --continue flag in daemon mode (bd-ieyy)
+			// Note: --continue requires direct database access to walk parent-child chain
+			if continueFlag && len(closedIssues) > 0 {
+				fmt.Fprintf(os.Stderr, "\nNote: --continue requires direct database access\n")
+				fmt.Fprintf(os.Stderr, "Hint: use --no-daemon flag: bd --no-daemon close %s --continue\n", resolvedIDs[0])
 			}
 
 			if jsonOutput && len(closedIssues) > 0 {
@@ -1057,10 +1089,19 @@ var closeCmd = &cobra.Command{
 
 		// Direct mode
 		closedIssues := []*types.Issue{}
+		closedCount := 0
 		for _, id := range resolvedIDs {
+			// Get issue for checks
+			issue, _ := store.GetIssue(ctx, id)
+
+			// Check if issue is a template (beads-1ra): templates are read-only
+			if issue != nil && issue.IsTemplate {
+				fmt.Fprintf(os.Stderr, "Error: cannot close template %s: templates are read-only\n", id)
+				continue
+			}
+
 			// Check if issue is pinned (bd-6v2)
 			if !force {
-				issue, _ := store.GetIssue(ctx, id)
 				if issue != nil && issue.Status == types.StatusPinned {
 					fmt.Fprintf(os.Stderr, "Error: cannot close pinned issue %s (use --force to override)\n", id)
 					continue
@@ -1072,25 +1113,49 @@ var closeCmd = &cobra.Command{
 				continue
 			}
 
+			closedCount++
+
 			// Run close hook (bd-kwro.8)
-			issue, _ := store.GetIssue(ctx, id)
-			if issue != nil && hookRunner != nil {
-				hookRunner.Run(hooks.EventClose, issue)
+			closedIssue, _ := store.GetIssue(ctx, id)
+			if closedIssue != nil {
+				if hookRunner != nil {
+					hookRunner.Run(hooks.EventClose, closedIssue)
+				}
+				// Run config-based close hooks (bd-g4b4)
+				hooks.RunConfigCloseHooks(ctx, closedIssue)
 			}
 
 			if jsonOutput {
-				if issue != nil {
-					closedIssues = append(closedIssues, issue)
+				if closedIssue != nil {
+					closedIssues = append(closedIssues, closedIssue)
 				}
 			} else {
-				green := color.New(color.FgGreen).SprintFunc()
-				fmt.Printf("%s Closed %s: %s\n", green("✓"), id, reason)
+				fmt.Printf("%s Closed %s: %s\n", ui.RenderPass("✓"), id, reason)
 			}
 		}
 
 		// Schedule auto-flush if any issues were closed
 		if len(args) > 0 {
 			markDirtyAndScheduleFlush()
+		}
+
+		// Handle --continue flag (bd-ieyy)
+		if continueFlag && len(resolvedIDs) == 1 && closedCount > 0 {
+			autoClaim := !noAuto
+			result, err := AdvanceToNextStep(ctx, store, resolvedIDs[0], autoClaim, actor)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: could not advance to next step: %v\n", err)
+			} else if result != nil {
+				if jsonOutput {
+					// Include continue result in JSON output
+					outputJSON(map[string]interface{}{
+						"closed":   closedIssues,
+						"continue": result,
+					})
+					return
+				}
+				PrintContinueResult(result)
+			}
 		}
 
 		if jsonOutput && len(closedIssues) > 0 {
@@ -1206,8 +1271,8 @@ func showMessageThread(ctx context.Context, messageID string, jsonOutput bool) {
 	}
 
 	// Sort by creation time
-	sort.Slice(threadMessages, func(i, j int) bool {
-		return threadMessages[i].CreatedAt.Before(threadMessages[j].CreatedAt)
+	slices.SortFunc(threadMessages, func(a, b *types.Issue) int {
+		return a.CreatedAt.Compare(b.CreatedAt)
 	})
 
 	if jsonOutput {
@@ -1218,10 +1283,7 @@ func showMessageThread(ctx context.Context, messageID string, jsonOutput bool) {
 	}
 
 	// Display the thread
-	cyan := color.New(color.FgCyan).SprintFunc()
-	dim := color.New(color.Faint).SprintFunc()
-
-	fmt.Printf("\n%s Thread: %s\n", cyan("📬"), rootMsg.Title)
+	fmt.Printf("\n%s Thread: %s\n", ui.RenderAccent("📬"), rootMsg.Title)
 	fmt.Println(strings.Repeat("─", 66))
 
 	for _, msg := range threadMessages {
@@ -1243,12 +1305,12 @@ func showMessageThread(ctx context.Context, messageID string, jsonOutput bool) {
 			statusIcon = "✓"
 		}
 
-		fmt.Printf("%s%s %s %s\n", indent, statusIcon, cyan(msg.ID), dim(timeStr))
+		fmt.Printf("%s%s %s %s\n", indent, statusIcon, ui.RenderAccent(msg.ID), ui.RenderMuted(timeStr))
 		fmt.Printf("%s  From: %s  To: %s\n", indent, msg.Sender, msg.Assignee)
 		if parentID := repliesTo[msg.ID]; parentID != "" {
 			fmt.Printf("%s  Re: %s\n", indent, parentID)
 		}
-		fmt.Printf("%s  %s: %s\n", indent, dim("Subject"), msg.Title)
+		fmt.Printf("%s  %s: %s\n", indent, ui.RenderMuted("Subject"), msg.Title)
 		if msg.Description != "" {
 			// Indent the body
 			bodyLines := strings.Split(msg.Description, "\n")
@@ -1358,11 +1420,11 @@ func init() {
 	updateCmd.Flags().StringP("status", "s", "", "New status")
 	registerPriorityFlag(updateCmd, "")
 	updateCmd.Flags().String("title", "", "New title")
-	updateCmd.Flags().StringP("type", "t", "", "New type (bug|feature|task|epic|chore|merge-request)")
+	updateCmd.Flags().StringP("type", "t", "", "New type (bug|feature|task|epic|chore|merge-request|molecule|gate)")
 	registerCommonIssueFlags(updateCmd)
 	updateCmd.Flags().String("notes", "", "Additional notes")
 	updateCmd.Flags().String("acceptance-criteria", "", "DEPRECATED: use --acceptance")
-	_ = updateCmd.Flags().MarkHidden("acceptance-criteria")
+	_ = updateCmd.Flags().MarkHidden("acceptance-criteria") // Only fails if flag missing (caught in tests)
 	updateCmd.Flags().IntP("estimate", "e", 0, "Time estimate in minutes (e.g., 60 for 1 hour)")
 	updateCmd.Flags().StringSlice("add-label", nil, "Add labels (repeatable)")
 	updateCmd.Flags().StringSlice("remove-label", nil, "Remove labels (repeatable)")
@@ -1379,7 +1441,11 @@ func init() {
 	rootCmd.AddCommand(editCmd)
 
 	closeCmd.Flags().StringP("reason", "r", "", "Reason for closing")
+	closeCmd.Flags().String("resolution", "", "Alias for --reason (Jira CLI convention)")
+	_ = closeCmd.Flags().MarkHidden("resolution") // Hidden alias for agent/CLI ergonomics
 	closeCmd.Flags().Bool("json", false, "Output JSON format")
 	closeCmd.Flags().BoolP("force", "f", false, "Force close pinned issues")
+	closeCmd.Flags().Bool("continue", false, "Auto-advance to next step in molecule")
+	closeCmd.Flags().Bool("no-auto", false, "With --continue, show next step but don't claim it")
 	rootCmd.AddCommand(closeCmd)
 }

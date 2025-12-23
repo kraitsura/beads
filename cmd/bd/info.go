@@ -12,8 +12,9 @@ import (
 )
 
 var infoCmd = &cobra.Command{
-	Use:   "info",
-	Short: "Show database and daemon information",
+	Use:     "info",
+	GroupID: "setup",
+	Short:   "Show database and daemon information",
 	Long: `Display information about the current database path and daemon status.
 
 This command helps debug issues where bd is using an unexpected database
@@ -288,6 +289,115 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "0.35.0",
+		Date:    "2025-12-23",
+		Changes: []string{
+			"NEW: bd activity command - Real-time state feed for molecule monitoring (bd-xo1o.3)",
+			"NEW: Dynamic molecule bonding - bd mol bond --ref <id> attaches protos at runtime (bd-xo1o.1)",
+			"NEW: waits-for dependency type - Fanout gates for parallel step coordination (bd-xo1o.2)",
+			"NEW: Parallel step detection - Molecules auto-detect parallelizable steps (bd-xo1o.4)",
+			"NEW: bd list --parent flag - Filter issues by parent (bd-yqhh)",
+			"NEW: Molecule navigation - bd mol next/prev/current for step traversal (bd-sal9, bd-ieyy)",
+			"NEW: Entity tracking types - Creator and Validations fields for work attribution (bd-7pwh)",
+			"IMPROVED: bd doctor --fix replaces manual commands (GH#715)",
+			"IMPROVED: bd dep tree shows external dependencies (bd-vks2, bd-mv6h, bd-d9mu)",
+			"IMPROVED: Performance indexes for large databases (bd-bha9, bd-a9y3, bd-jke6, bd-8x3w, bd-lk39)",
+			"FIX: Rich mutation events emitted for status changes (bd-313v)",
+			"FIX: External deps filtered from GetBlockedIssues (bd-396j)",
+			"FIX: bd create -f works with daemon mode (GH#719)",
+			"FIX: Parallel execution migration race conditions (GH#720)",
+		},
+	},
+	{
+		Version: "0.34.0",
+		Date:    "2025-12-22",
+		Changes: []string{
+			"NEW: Wisp commands - bd wisp create/list/gc for ephemeral molecule management",
+			"NEW: Chemistry UX - bd pour, bd mol bond --wisp/--pour for phase control",
+			"NEW: Cross-project deps - external:<repo>:<id> syntax, bd ship command",
+			"BREAKING: bd repo add/remove now writes to .beads/config.yaml (not DB)",
+			"FIX: Wisp storage auto-copies issue_prefix from main database",
+		},
+	},
+	{
+		Version: "0.33.2",
+		Date:    "2025-12-21",
+		Changes: []string{
+			"FIX: P0 priority preserved - omitempty removed from Priority field (GH#671)",
+			"FIX: nil pointer check in markdown parsing (GH#674)",
+			"CHORE: Remove dead deprecated wrapper functions from deletion_tracking.go",
+		},
+	},
+	{
+		Version: "0.33.1",
+		Date:    "2025-12-21",
+		Changes: []string{
+			"BREAKING: Ephemeral → Wisp rename - JSON field changed from 'ephemeral' to 'wisp'",
+			"BREAKING: CLI flag changed from --ephemeral to --wisp (bd cleanup)",
+			"NOTE: SQLite column remains 'ephemeral' (no migration needed)",
+		},
+	},
+	{
+		Version: "0.33.0",
+		Date:    "2025-12-21",
+		Changes: []string{
+			"NEW: Wisp molecules (bd-2vh3) - bd mol spawn creates wisp issues by default",
+			"NEW: Wisp issues live only in SQLite, never export to JSONL (prevents zombie resurrection)",
+			"NEW: --persistent flag on bd mol spawn to opt out of wisp spawning",
+			"NEW: bd mol squash compresses wisp children into digest issue",
+			"NEW: --summary flag on bd mol squash for agent-provided AI summaries",
+			"FIX: DeleteIssue now cascades to comments table (bd-687g)",
+		},
+	},
+	{
+		Version: "0.32.1",
+		Date:    "2025-12-21",
+		Changes: []string{
+			"NEW: MCP output control params (PR#667) - brief, brief_deps, fields, max_description_length",
+			"NEW: MCP filtering params - labels, labels_any, query, unassigned, sort_policy",
+			"NEW: BriefIssue, BriefDep, OperationResult models for 97% context reduction",
+			"FIX: Pin field not in allowed update fields (gt-zr0a) - bd update --pinned now works",
+		},
+	},
+	{
+		Version: "0.32.0",
+		Date:    "2025-12-20",
+		Changes: []string{
+			"REMOVED: bd mail commands (send, inbox, read, ack, reply) - Mail is orchestration, not data plane",
+			"NOTE: Data model unchanged - type=message, Sender, Ephemeral, replies_to fields remain",
+			"NOTE: Orchestration tools should implement mail UI on top of beads data model",
+			"FIX: Symlink preservation in atomicWriteFile (PR#665) - bd setup no longer clobbers nix/home-manager configs",
+			"FIX: Broken link to LABELS.md in examples (GH#666)",
+		},
+	},
+	{
+		Version: "0.31.0",
+		Date:    "2025-12-20",
+		Changes: []string{
+			"NEW: bd defer/bd undefer commands - Deferred status for icebox issues (bd-4jr)",
+			"NEW: Agent audit trail - .beads/interactions.jsonl with bd audit record/label (GH#649)",
+			"NEW: Directory-aware label scoping for monorepos (GH#541) - Auto-filter by directory.labels config",
+			"NEW: Molecules catalog - Templates in separate molecules.jsonl with hierarchical loading",
+			"NEW: Git commit config - git.author and git.no-gpg-sign options (GH#600)",
+			"NEW: create.require-description config option (GH#596)",
+			"CHANGED: bd stats merged into bd status (GH#644) - stats is now alias, colorized output",
+			"CHANGED: Thin hook shims (GH#615) - Hooks delegate to bd hooks run, no more version drift",
+			"CHANGED: MCP context tool consolidation - set_context/where_am_i/init merged into single context tool",
+			"FIX: relates-to excluded from cycle detection (GH#661)",
+			"FIX: Doctor checks .local_version instead of deprecated LastBdVersion (GH#662)",
+			"FIX: Read-only gitignore in stealth mode prints manual instructions (GH#663)",
+		},
+	},
+	{
+		Version: "0.30.7",
+		Date:    "2025-12-19",
+		Changes: []string{
+			"FIX: bd graph no longer crashes with nil pointer on epics (fixes #657)",
+			"FIX: Windows npm installer no longer fails with file lock error (fixes #652)",
+			"NEW: Version Bump molecule template for repeatable release workflows",
+		},
+	},
+	{
 		Version: "0.30.6",
 		Date:    "2025-12-18",
 		Changes: []string{
@@ -330,7 +440,7 @@ var versionChanges = []VersionChange{
 		Date:    "2025-12-16",
 		Changes: []string{
 			"bd setup droid (GH#598) - Factory.ai (Droid) IDE support",
-			"Messaging schema fields (bd-kwro.1) - New 'message' issue type, sender/ephemeral/replies_to/relates_to/duplicate_of/superseded_by fields",
+			"Messaging schema fields (bd-kwro.1) - New 'message' issue type, sender/wisp/replies_to/relates_to/duplicate_of/superseded_by fields",
 			"New dependency types: replies-to, relates-to, duplicates, supersedes",
 			"Windows build fixes (GH#585) - gosec lint errors resolved",
 			"Issue ID prefix extraction fix - Word-like suffixes now parse correctly",

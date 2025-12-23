@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/beads"
@@ -21,12 +20,14 @@ import (
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/syncbranch"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
 )
 
 var initCmd = &cobra.Command{
-	Use:   "init",
-	Short: "Initialize bd in the current directory",
+	Use:     "init",
+	GroupID: "setup",
+	Short:   "Initialize bd in the current directory",
 	Long: `Initialize bd in the current directory by creating a .beads/ directory
 and database file. Optionally specify a custom issue prefix.
 
@@ -195,6 +196,16 @@ With --stealth: configures global git settings for invisible beads usage:
 					}
 				}
 
+				// Create empty interactions.jsonl file (append-only agent audit log)
+				interactionsPath := filepath.Join(beadsDir, "interactions.jsonl")
+				if _, err := os.Stat(interactionsPath); os.IsNotExist(err) {
+					// nolint:gosec // G306: JSONL file needs to be readable by other tools
+					if err := os.WriteFile(interactionsPath, []byte{}, 0644); err != nil {
+						fmt.Fprintf(os.Stderr, "Error: failed to create interactions.jsonl: %v\n", err)
+						os.Exit(1)
+					}
+				}
+
 				// Create metadata.json for --no-db mode
 				cfg := configfile.DefaultConfig()
 				if err := cfg.Save(beadsDir); err != nil {
@@ -215,15 +226,12 @@ With --stealth: configures global git settings for invisible beads usage:
 				}
 
 				if !quiet {
-					green := color.New(color.FgGreen).SprintFunc()
-					cyan := color.New(color.FgCyan).SprintFunc()
-
-					fmt.Printf("\n%s bd initialized successfully in --no-db mode!\n\n", green("✓"))
-					fmt.Printf("  Mode: %s\n", cyan("no-db (JSONL-only)"))
-					fmt.Printf("  Issues file: %s\n", cyan(jsonlPath))
-					fmt.Printf("  Issue prefix: %s\n", cyan(prefix))
-					fmt.Printf("  Issues will be named: %s\n\n", cyan(prefix+"-<hash> (e.g., "+prefix+"-a3f2dd)"))
-					fmt.Printf("Run %s to get started.\n\n", cyan("bd --no-db quickstart"))
+					fmt.Printf("\n%s bd initialized successfully in --no-db mode!\n\n", ui.RenderPass("✓"))
+					fmt.Printf("  Mode: %s\n", ui.RenderAccent("no-db (JSONL-only)"))
+					fmt.Printf("  Issues file: %s\n", ui.RenderAccent(jsonlPath))
+					fmt.Printf("  Issue prefix: %s\n", ui.RenderAccent(prefix))
+					fmt.Printf("  Issues will be named: %s\n\n", ui.RenderAccent(prefix+"-<hash> (e.g., "+prefix+"-a3f2dd)"))
+					fmt.Printf("Run %s to get started.\n\n", ui.RenderAccent("bd --no-db quickstart"))
 				}
 				return
 			}
@@ -233,6 +241,16 @@ With --stealth: configures global git settings for invisible beads usage:
 			if err := os.WriteFile(gitignorePath, []byte(doctor.GitignoreTemplate), 0600); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to create/update .gitignore: %v\n", err)
 				// Non-fatal - continue anyway
+			}
+
+			// Ensure interactions.jsonl exists (append-only agent audit log)
+			interactionsPath := filepath.Join(beadsDir, "interactions.jsonl")
+			if _, err := os.Stat(interactionsPath); os.IsNotExist(err) {
+				// nolint:gosec // G306: JSONL file needs to be readable by other tools
+				if err := os.WriteFile(interactionsPath, []byte{}, 0644); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to create interactions.jsonl: %v\n", err)
+					// Non-fatal - continue anyway
+				}
 			}
 		}
 
@@ -407,9 +425,8 @@ With --stealth: configures global git settings for invisible beads usage:
 		// Install by default unless --skip-hooks is passed
 		if !skipHooks && isGitRepo() && !hooksInstalled() {
 			if err := installGitHooks(); err != nil && !quiet {
-				yellow := color.New(color.FgYellow).SprintFunc()
-				fmt.Fprintf(os.Stderr, "\n%s Failed to install git hooks: %v\n", yellow("⚠"), err)
-				fmt.Fprintf(os.Stderr, "You can try again with: %s\n\n", color.New(color.FgCyan).Sprint("bd doctor --fix"))
+				fmt.Fprintf(os.Stderr, "\n%s Failed to install git hooks: %v\n", ui.RenderWarn("⚠"), err)
+				fmt.Fprintf(os.Stderr, "You can try again with: %s\n\n", ui.RenderAccent("bd doctor --fix"))
 			}
 		}
 
@@ -417,9 +434,8 @@ With --stealth: configures global git settings for invisible beads usage:
 		// Install by default unless --skip-merge-driver is passed
 		if !skipMergeDriver && isGitRepo() && !mergeDriverInstalled() {
 			if err := installMergeDriver(); err != nil && !quiet {
-				yellow := color.New(color.FgYellow).SprintFunc()
-				fmt.Fprintf(os.Stderr, "\n%s Failed to install merge driver: %v\n", yellow("⚠"), err)
-				fmt.Fprintf(os.Stderr, "You can try again with: %s\n\n", color.New(color.FgCyan).Sprint("bd doctor --fix"))
+				fmt.Fprintf(os.Stderr, "\n%s Failed to install merge driver: %v\n", ui.RenderWarn("⚠"), err)
+				fmt.Fprintf(os.Stderr, "You can try again with: %s\n\n", ui.RenderAccent("bd doctor --fix"))
 			}
 		}
 
@@ -434,14 +450,11 @@ With --stealth: configures global git settings for invisible beads usage:
 			return
 		}
 
-		green := color.New(color.FgGreen).SprintFunc()
-		cyan := color.New(color.FgCyan).SprintFunc()
-
-		fmt.Printf("\n%s bd initialized successfully!\n\n", green("✓"))
-		fmt.Printf("  Database: %s\n", cyan(initDBPath))
-		fmt.Printf("  Issue prefix: %s\n", cyan(prefix))
-		fmt.Printf("  Issues will be named: %s\n\n", cyan(prefix+"-<hash> (e.g., "+prefix+"-a3f2dd)"))
-		fmt.Printf("Run %s to get started.\n\n", cyan("bd quickstart"))
+		fmt.Printf("\n%s bd initialized successfully!\n\n", ui.RenderPass("✓"))
+		fmt.Printf("  Database: %s\n", ui.RenderAccent(initDBPath))
+		fmt.Printf("  Issue prefix: %s\n", ui.RenderAccent(prefix))
+		fmt.Printf("  Issues will be named: %s\n\n", ui.RenderAccent(prefix+"-<hash> (e.g., "+prefix+"-a3f2dd)"))
+		fmt.Printf("Run %s to get started.\n\n", ui.RenderAccent("bd quickstart"))
 
 		// Run bd doctor diagnostics to catch setup issues early (bd-zwtq)
 		doctorResult := runDiagnostics(cwd)
@@ -454,15 +467,14 @@ With --stealth: configures global git settings for invisible beads usage:
 			}
 		}
 		if hasIssues {
-			yellow := color.New(color.FgYellow).SprintFunc()
-			fmt.Printf("%s Setup incomplete. Some issues were detected:\n", yellow("⚠"))
+			fmt.Printf("%s Setup incomplete. Some issues were detected:\n", ui.RenderWarn("⚠"))
 			// Show just the warnings/errors, not all checks
 			for _, check := range doctorResult.Checks {
 				if check.Status != statusOK {
 					fmt.Printf("  • %s: %s\n", check.Name, check.Message)
 				}
 			}
-			fmt.Printf("\nRun %s to see details and fix these issues.\n\n", cyan("bd doctor --fix"))
+			fmt.Printf("\nRun %s to see details and fix these issues.\n\n", ui.RenderAccent("bd doctor --fix"))
 		}
 	},
 }
@@ -572,9 +584,7 @@ func detectExistingHooks() []hookInfo {
 
 // promptHookAction asks user what to do with existing hooks
 func promptHookAction(existingHooks []hookInfo) string {
-	yellow := color.New(color.FgYellow).SprintFunc()
-
-	fmt.Printf("\n%s Found existing git hooks:\n", yellow("⚠"))
+	fmt.Printf("\n%s Found existing git hooks:\n", ui.RenderWarn("⚠"))
 	for _, hook := range existingHooks {
 		if hook.exists && !hook.isBdHook {
 			hookType := "custom script"
@@ -626,7 +636,6 @@ func installGitHooks() error {
 	// Determine installation mode
 	chainHooks := false
 	if hasExistingHooks {
-		cyan := color.New(color.FgCyan).SprintFunc()
 		choice := promptHookAction(existingHooks)
 		switch choice {
 		case "1", "":
@@ -645,7 +654,7 @@ func installGitHooks() error {
 			}
 		case "3":
 			fmt.Printf("Skipping git hooks installation.\n")
-			fmt.Printf("You can install manually later with: %s\n", cyan("./examples/git-hooks/install.sh"))
+			fmt.Printf("You can install manually later with: %s\n", ui.RenderAccent("./examples/git-hooks/install.sh"))
 			return nil
 		default:
 			return fmt.Errorf("invalid choice: %s", choice)
@@ -951,8 +960,7 @@ exit 0
 	}
 
 	if chainHooks {
-		green := color.New(color.FgGreen).SprintFunc()
-		fmt.Printf("%s Chained bd hooks with existing hooks\n", green("✓"))
+		fmt.Printf("%s Chained bd hooks with existing hooks\n", ui.RenderPass("✓"))
 	}
 
 	return nil
@@ -1380,12 +1388,10 @@ func setupStealthMode(verbose bool) error {
 	}
 
 	if verbose {
-		green := color.New(color.FgGreen).SprintFunc()
-		cyan := color.New(color.FgCyan).SprintFunc()
-		fmt.Printf("\n%s Stealth mode configured successfully!\n\n", green("✓"))
-		fmt.Printf("  Global gitignore: %s\n", cyan(projectPath+"/.beads/ ignored"))
-		fmt.Printf("  Claude settings: %s\n\n", cyan("configured with bd onboard instruction"))
-		fmt.Printf("Your beads setup is now %s - other repo collaborators won't see any beads-related files.\n\n", cyan("invisible"))
+		fmt.Printf("\n%s Stealth mode configured successfully!\n\n", ui.RenderPass("✓"))
+		fmt.Printf("  Global gitignore: %s\n", ui.RenderAccent(projectPath+"/.beads/ ignored"))
+		fmt.Printf("  Claude settings: %s\n\n", ui.RenderAccent("configured with bd onboard instruction"))
+		fmt.Printf("Your beads setup is now %s - other repo collaborators won't see any beads-related files.\n\n", ui.RenderAccent("invisible"))
 	}
 
 	return nil
@@ -1483,7 +1489,19 @@ func setupGlobalGitIgnore(homeDir string, projectPath string, verbose bool) erro
 	// Write the updated ignore file
 	// #nosec G306 - config file needs 0644
 	if err := os.WriteFile(ignorePath, []byte(newContent), 0644); err != nil {
-		return fmt.Errorf("failed to write global gitignore: %w", err)
+		fmt.Printf("\nUnable to write to %s (file is read-only)\n\n", ignorePath)
+		fmt.Printf("To enable stealth mode, add these lines to your global gitignore:\n\n")
+		if !hasBeads || !hasClaude {
+			fmt.Printf("# Beads stealth mode: %s\n", projectPath)
+		}
+		if !hasBeads {
+			fmt.Printf("%s\n", beadsPattern)
+		}
+		if !hasClaude {
+			fmt.Printf("%s\n", claudePattern)
+		}
+		fmt.Println()
+		return nil
 	}
 
 	if verbose {
@@ -1530,9 +1548,6 @@ func checkExistingBeadsData(prefix string) error {
 	// Check for existing database file
 	dbPath := filepath.Join(beadsDir, beads.CanonicalDatabaseName)
 	if _, err := os.Stat(dbPath); err == nil {
-		yellow := color.New(color.FgYellow).SprintFunc()
-		cyan := color.New(color.FgCyan).SprintFunc()
-
 		return fmt.Errorf(`
 %s Found existing database: %s
 
@@ -1544,7 +1559,7 @@ To use the existing database:
 To completely reinitialize (data loss warning):
   rm -rf .beads && bd init --prefix %s
 
-Aborting.`, yellow("⚠"), dbPath, cyan("bd list"), prefix)
+Aborting.`, ui.RenderWarn("⚠"), dbPath, ui.RenderAccent("bd list"), prefix)
 	}
 
 	// Fresh clones (JSONL exists but no database) are allowed - init will
@@ -1554,7 +1569,6 @@ Aborting.`, yellow("⚠"), dbPath, cyan("bd list"), prefix)
 
 	return nil // No database found, safe to init
 }
-
 
 // landingThePlaneSection is the "landing the plane" instructions for AI agents
 // This gets appended to AGENTS.md and @AGENTS.md during bd init
@@ -1586,17 +1600,15 @@ const landingThePlaneSection = `
 - If push fails, resolve and retry until it succeeds
 `
 
-// addLandingThePlaneInstructions adds "landing the plane" instructions to AGENTS.md and @AGENTS.md
+// addLandingThePlaneInstructions adds "landing the plane" instructions to AGENTS.md
 func addLandingThePlaneInstructions(verbose bool) {
-	// Files to update (AGENTS.md and @AGENTS.md for web Claude)
-	agentFiles := []string{"AGENTS.md", "@AGENTS.md"}
+	// File to update (AGENTS.md is the standard comprehensive documentation file)
+	agentFile := "AGENTS.md"
 
-	for _, filename := range agentFiles {
-		if err := updateAgentFile(filename, verbose); err != nil {
-			// Non-fatal - continue with other files
-			if verbose {
-				fmt.Fprintf(os.Stderr, "Warning: failed to update %s: %v\n", filename, err)
-			}
+	if err := updateAgentFile(agentFile, verbose); err != nil {
+		// Non-fatal - continue with other files
+		if verbose {
+			fmt.Fprintf(os.Stderr, "Warning: failed to update %s: %v\n", agentFile, err)
 		}
 	}
 }
@@ -1610,17 +1622,17 @@ func updateAgentFile(filename string, verbose bool) error {
 		// File doesn't exist - create it with basic structure
 		newContent := fmt.Sprintf(`# Agent Instructions
 
-This project uses **bd** (beads) for issue tracking. Run ` + "`bd onboard`" + ` to get started.
+This project uses **bd** (beads) for issue tracking. Run `+"`bd onboard`"+` to get started.
 
 ## Quick Reference
 
-` + "```bash" + `
+`+"```bash"+`
 bd ready              # Find available work
 bd show <id>          # View issue details
 bd update <id> --status in_progress  # Claim work
 bd close <id>         # Complete work
 bd sync               # Sync with git
-` + "```" + `
+`+"```"+`
 %s
 `, landingThePlaneSection)
 
@@ -1629,8 +1641,7 @@ bd sync               # Sync with git
 			return fmt.Errorf("failed to create %s: %w", filename, err)
 		}
 		if verbose {
-			green := color.New(color.FgGreen).SprintFunc()
-			fmt.Printf("  %s Created %s with landing-the-plane instructions\n", green("✓"), filename)
+			fmt.Printf("  %s Created %s with landing-the-plane instructions\n", ui.RenderPass("✓"), filename)
 		}
 		return nil
 	} else if err != nil {
@@ -1657,8 +1668,7 @@ bd sync               # Sync with git
 		return fmt.Errorf("failed to update %s: %w", filename, err)
 	}
 	if verbose {
-		green := color.New(color.FgGreen).SprintFunc()
-		fmt.Printf("  %s Added landing-the-plane instructions to %s\n", green("✓"), filename)
+		fmt.Printf("  %s Added landing-the-plane instructions to %s\n", ui.RenderPass("✓"), filename)
 	}
 	return nil
 }

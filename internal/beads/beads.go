@@ -11,7 +11,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -205,25 +204,28 @@ type (
 const (
 	StatusOpen       = types.StatusOpen
 	StatusInProgress = types.StatusInProgress
-	StatusClosed     = types.StatusClosed
 	StatusBlocked    = types.StatusBlocked
+	StatusDeferred   = types.StatusDeferred
+	StatusClosed     = types.StatusClosed
 )
 
 // IssueType constants
 const (
-	TypeBug     = types.TypeBug
-	TypeFeature = types.TypeFeature
-	TypeTask    = types.TypeTask
-	TypeEpic    = types.TypeEpic
-	TypeChore   = types.TypeChore
+	TypeBug      = types.TypeBug
+	TypeFeature  = types.TypeFeature
+	TypeTask     = types.TypeTask
+	TypeEpic     = types.TypeEpic
+	TypeChore    = types.TypeChore
+	TypeMolecule = types.TypeMolecule
 )
 
 // DependencyType constants
 const (
-	DepBlocks         = types.DepBlocks
-	DepRelated        = types.DepRelated
-	DepParentChild    = types.DepParentChild
-	DepDiscoveredFrom = types.DepDiscoveredFrom
+	DepBlocks            = types.DepBlocks
+	DepRelated           = types.DepRelated
+	DepParentChild       = types.DepParentChild
+	DepDiscoveredFrom    = types.DepDiscoveredFrom
+	DepConditionalBlocks = types.DepConditionalBlocks // B runs only if A fails (bd-kzda)
 )
 
 // SortPolicy constants
@@ -440,15 +442,10 @@ type DatabaseInfo struct {
 // or empty string if not in a git repository. Used to limit directory
 // tree walking to within the current git repo (bd-c8x).
 //
-// This function is worktree-aware and will correctly identify the repository
-// root in both regular repositories and git worktrees.
+// This function delegates to git.GetRepoRoot() which is worktree-aware
+// and handles Windows path normalization.
 func findGitRoot() string {
-	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
-	output, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(output))
+	return git.GetRepoRoot()
 }
 
 // findDatabaseInTree walks up the directory tree looking for .beads/*.db
@@ -528,10 +525,11 @@ func findDatabaseInTree() string {
 	return ""
 }
 
-// FindAllDatabases scans the directory hierarchy for all .beads directories
-// Returns a slice of DatabaseInfo for each database found, starting from the
-// closest to CWD (most relevant) to the furthest (least relevant).
-// Stops at the git repository root to avoid finding unrelated databases (bd-c8x).
+// FindAllDatabases scans the directory hierarchy for the closest .beads directory.
+// Returns a slice with at most one DatabaseInfo - the closest database to CWD.
+// Stops searching upward as soon as a .beads directory is found (gt-bzd),
+// because in multi-workspace setups (like Gas Town), nested .beads directories
+// are intentional and separate - parent directories are out of scope.
 // Redirect files are supported: if a .beads/redirect file exists, its contents
 // are used as the actual .beads directory path.
 func FindAllDatabases() []DatabaseInfo {
@@ -594,6 +592,10 @@ func FindAllDatabases() []DatabaseInfo {
 					BeadsDir:   beadsDir,
 					IssueCount: issueCount,
 				})
+
+				// Stop searching upward - the closest .beads is the one to use (gt-bzd)
+				// Parent directories are out of scope in multi-workspace setups
+				break
 			}
 		}
 
@@ -613,4 +615,138 @@ func FindAllDatabases() []DatabaseInfo {
 	}
 
 	return databases
+}
+
+// WispDirName is the default name for the wisp storage directory.
+// This directory is a sibling to .beads/ and should be gitignored.
+// Wisps are ephemeral molecules - the "steam" in Gas Town's engine metaphor.
+const WispDirName = ".beads-wisp"
+
+// FindWispDir locates or determines the wisp storage directory.
+// The wisp directory is a sibling to the .beads directory.
+//
+// Returns the path to the wisp directory (which may not exist yet).
+// Returns empty string if no .beads directory can be found.
+func FindWispDir() string {
+	beadsDir := FindBeadsDir()
+	if beadsDir == "" {
+		return ""
+	}
+
+	// Wisp dir is a sibling to .beads
+	// e.g., /project/.beads -> /project/.beads-wisp
+	projectRoot := filepath.Dir(beadsDir)
+	return filepath.Join(projectRoot, WispDirName)
+}
+
+// FindWispDatabasePath returns the path to the wisp database file.
+// Creates the wisp directory if it doesn't exist.
+// Returns empty string if no .beads directory can be found.
+func FindWispDatabasePath() (string, error) {
+	wispDir := FindWispDir()
+	if wispDir == "" {
+		return "", fmt.Errorf("no .beads directory found")
+	}
+
+	// Create wisp directory if it doesn't exist
+	if err := os.MkdirAll(wispDir, 0755); err != nil {
+		return "", fmt.Errorf("creating wisp directory: %w", err)
+	}
+
+	return filepath.Join(wispDir, CanonicalDatabaseName), nil
+}
+
+// NewWispStorage opens the wisp database for ephemeral molecule storage.
+// Creates the database and directory if they don't exist.
+// The wisp database uses the same schema as the main database.
+// Automatically copies issue_prefix from the main beads config if not set.
+func NewWispStorage(ctx context.Context) (Storage, error) {
+	dbPath, err := FindWispDatabasePath()
+	if err != nil {
+		return nil, err
+	}
+
+	wispStore, err := sqlite.New(ctx, dbPath)
+	if err != nil {
+		return nil, err
+	}
+
+	// Check if wisp db has issue_prefix configured
+	prefix, err := wispStore.GetConfig(ctx, "issue_prefix")
+	if err != nil || prefix == "" {
+		// Copy issue_prefix from main beads database
+		mainDBPath := FindDatabasePath()
+		if mainDBPath != "" {
+			mainStore, mainErr := sqlite.New(ctx, mainDBPath)
+			if mainErr == nil {
+				defer func() { _ = mainStore.Close() }()
+				mainPrefix, _ := mainStore.GetConfig(ctx, "issue_prefix")
+				if mainPrefix != "" {
+					if setErr := wispStore.SetConfig(ctx, "issue_prefix", mainPrefix); setErr != nil {
+						_ = wispStore.Close()
+						return nil, fmt.Errorf("setting wisp issue_prefix: %w", setErr)
+					}
+				}
+			}
+		}
+	}
+
+	return wispStore, nil
+}
+
+// EnsureWispGitignore ensures the wisp directory is gitignored.
+// This should be called after creating the wisp directory.
+func EnsureWispGitignore() error {
+	beadsDir := FindBeadsDir()
+	if beadsDir == "" {
+		return fmt.Errorf("no .beads directory found")
+	}
+
+	projectRoot := filepath.Dir(beadsDir)
+	gitignorePath := filepath.Join(projectRoot, ".gitignore")
+
+	// Check if .gitignore exists and already contains the wisp dir
+	content, err := os.ReadFile(gitignorePath)
+	if err == nil {
+		// File exists, check if already gitignored
+		lines := strings.Split(string(content), "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line == WispDirName || line == WispDirName+"/" {
+				return nil // Already gitignored
+			}
+		}
+	}
+
+	// Append to .gitignore (or create it)
+	// #nosec G302 -- .gitignore is a public config file, 0644 is standard
+	f, err := os.OpenFile(gitignorePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("opening .gitignore: %w", err)
+	}
+	defer f.Close()
+
+	// Add newline before if file doesn't end with one
+	if len(content) > 0 && content[len(content)-1] != '\n' {
+		if _, err := f.WriteString("\n"); err != nil {
+			return fmt.Errorf("writing to .gitignore: %w", err)
+		}
+	}
+
+	// Add the wisp directory
+	if _, err := f.WriteString(WispDirName + "/\n"); err != nil {
+		return fmt.Errorf("writing to .gitignore: %w", err)
+	}
+
+	return nil
+}
+
+// IsWispDatabase checks if a database path is a wisp database.
+// Returns true if the database is in a .beads-wisp directory.
+func IsWispDatabase(dbPath string) bool {
+	if dbPath == "" {
+		return false
+	}
+	dir := filepath.Dir(dbPath)
+	return filepath.Base(dir) == WispDirName
 }

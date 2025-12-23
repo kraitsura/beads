@@ -11,8 +11,9 @@ import (
 )
 
 var configCmd = &cobra.Command{
-	Use:   "config",
-	Short: "Manage configuration settings",
+	Use:     "config",
+	GroupID: "setup",
+	Short:   "Manage configuration settings",
 	Long: `Manage configuration settings for external integrations and preferences.
 
 Configuration is stored per-project in .beads/*.db and is version-control-friendly.
@@ -32,7 +33,7 @@ Custom Status States:
     bd config set status.custom "awaiting_review,awaiting_testing,awaiting_docs"
 
   This enables issues to use statuses like 'awaiting_review' in addition to
-  the built-in statuses (open, in_progress, blocked, closed).
+  the built-in statuses (open, in_progress, blocked, deferred, closed).
 
 Examples:
   bd config set jira.url "https://company.atlassian.net"

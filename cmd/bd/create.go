@@ -6,7 +6,6 @@ import (
 	"os"
 	"strings"
 
-	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
@@ -14,11 +13,13 @@ import (
 	"github.com/steveyegge/beads/internal/routing"
 	"github.com/steveyegge/beads/internal/rpc"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/validation"
 )
 
 var createCmd = &cobra.Command{
 	Use:     "create [title]",
+	GroupID: "issues",
 	Aliases: []string{"new"},
 	Short:   "Create a new issue (or multiple issues from markdown file)",
 	Args:    cobra.MinimumNArgs(0), // Changed to allow no args when using -f
@@ -59,20 +60,24 @@ var createCmd = &cobra.Command{
 
 		// Warn if creating a test issue in production database (unless silent mode)
 		if strings.HasPrefix(strings.ToLower(title), "test") && !silent && !debug.IsQuiet() {
-			yellow := color.New(color.FgYellow).SprintFunc()
-			fmt.Fprintf(os.Stderr, "%s Creating issue with 'Test' prefix in production database.\n", yellow("⚠"))
+			fmt.Fprintf(os.Stderr, "%s Creating issue with 'Test' prefix in production database.\n", ui.RenderWarn("⚠"))
 			fmt.Fprintf(os.Stderr, "  For testing, consider using: BEADS_DB=/tmp/test.db ./bd create \"Test issue\"\n")
 		}
 
 		// Get field values
 		description, _ := getDescriptionFlag(cmd)
 
-		// Warn if creating an issue without a description (unless it's a test issue or silent mode)
-		if description == "" && !strings.Contains(strings.ToLower(title), "test") && !silent && !debug.IsQuiet() {
-			yellow := color.New(color.FgYellow).SprintFunc()
-			fmt.Fprintf(os.Stderr, "%s Creating issue without description.\n", yellow("⚠"))
-			fmt.Fprintf(os.Stderr, "  Issues without descriptions lack context for future work.\n")
-			fmt.Fprintf(os.Stderr, "  Consider adding --description=\"Why this issue exists and what needs to be done\"\n")
+		// Check if description is required by config
+		if description == "" && !strings.Contains(strings.ToLower(title), "test") {
+			if config.GetBool("create.require-description") {
+				FatalError("description is required (set create.require-description: false in config.yaml to disable)")
+			}
+			// Warn if creating an issue without a description (unless silent mode)
+			if !silent && !debug.IsQuiet() {
+				fmt.Fprintf(os.Stderr, "%s Creating issue without description.\n", ui.RenderWarn("⚠"))
+				fmt.Fprintf(os.Stderr, "  Issues without descriptions lack context for future work.\n")
+				fmt.Fprintf(os.Stderr, "  Consider adding --description=\"Why this issue exists and what needs to be done\"\n")
+			}
 		}
 
 		design, _ := cmd.Flags().GetString("design")
@@ -98,6 +103,8 @@ var createCmd = &cobra.Command{
 		parentID, _ := cmd.Flags().GetString("parent")
 		externalRef, _ := cmd.Flags().GetString("external-ref")
 		deps, _ := cmd.Flags().GetStringSlice("deps")
+		waitsFor, _ := cmd.Flags().GetString("waits-for")
+		waitsForGate, _ := cmd.Flags().GetString("waits-for-gate")
 		forceCreate, _ := cmd.Flags().GetBool("force")
 		repoOverride, _ := cmd.Flags().GetString("repo")
 
@@ -212,6 +219,8 @@ var createCmd = &cobra.Command{
 				EstimatedMinutes:   estimatedMinutes,
 				Labels:             labels,
 				Dependencies:       deps,
+				WaitsFor:           waitsFor,
+				WaitsForGate:       waitsForGate,
 			}
 
 			resp, err := daemonClient.Create(createArgs)
@@ -235,8 +244,7 @@ var createCmd = &cobra.Command{
 			} else if silent {
 				fmt.Println(issue.ID)
 			} else {
-				green := color.New(color.FgGreen).SprintFunc()
-				fmt.Printf("%s Created issue: %s\n", green("✓"), issue.ID)
+				fmt.Printf("%s Created issue: %s\n", ui.RenderPass("✓"), issue.ID)
 				fmt.Printf("  Title: %s\n", issue.Title)
 				fmt.Printf("  Priority: P%d\n", issue.Priority)
 				fmt.Printf("  Status: %s\n", issue.Status)
@@ -362,6 +370,37 @@ var createCmd = &cobra.Command{
 			}
 		}
 
+		// Add waits-for dependency if specified (bd-xo1o.2)
+		if waitsFor != "" {
+			// Validate gate type
+			gate := waitsForGate
+			if gate == "" {
+				gate = types.WaitsForAllChildren
+			}
+			if gate != types.WaitsForAllChildren && gate != types.WaitsForAnyChildren {
+				FatalError("invalid --waits-for-gate value '%s' (valid: all-children, any-children)", gate)
+			}
+
+			// Create metadata JSON
+			meta := types.WaitsForMeta{
+				Gate: gate,
+			}
+			metaJSON, err := json.Marshal(meta)
+			if err != nil {
+				FatalError("failed to serialize waits-for metadata: %v", err)
+			}
+
+			dep := &types.Dependency{
+				IssueID:     issue.ID,
+				DependsOnID: waitsFor,
+				Type:        types.DepWaitsFor,
+				Metadata:    string(metaJSON),
+			}
+			if err := store.AddDependency(ctx, dep, actor); err != nil {
+				WarnError("failed to add waits-for dependency %s -> %s: %v", issue.ID, waitsFor, err)
+			}
+		}
+
 		// Schedule auto-flush
 		markDirtyAndScheduleFlush()
 
@@ -375,8 +414,7 @@ var createCmd = &cobra.Command{
 		} else if silent {
 			fmt.Println(issue.ID)
 		} else {
-			green := color.New(color.FgGreen).SprintFunc()
-			fmt.Printf("%s Created issue: %s\n", green("✓"), issue.ID)
+			fmt.Printf("%s Created issue: %s\n", ui.RenderPass("✓"), issue.ID)
 			fmt.Printf("  Title: %s\n", issue.Title)
 			fmt.Printf("  Priority: P%d\n", issue.Priority)
 			fmt.Printf("  Status: %s\n", issue.Status)
@@ -392,14 +430,16 @@ func init() {
 	createCmd.Flags().String("title", "", "Issue title (alternative to positional argument)")
 	createCmd.Flags().Bool("silent", false, "Output only the issue ID (for scripting)")
 	registerPriorityFlag(createCmd, "2")
-	createCmd.Flags().StringP("type", "t", "task", "Issue type (bug|feature|task|epic|chore|merge-request)")
+	createCmd.Flags().StringP("type", "t", "task", "Issue type (bug|feature|task|epic|chore|merge-request|molecule|gate)")
 	registerCommonIssueFlags(createCmd)
 	createCmd.Flags().StringSliceP("labels", "l", []string{}, "Labels (comma-separated)")
 	createCmd.Flags().StringSlice("label", []string{}, "Alias for --labels")
-	_ = createCmd.Flags().MarkHidden("label")
+	_ = createCmd.Flags().MarkHidden("label") // Only fails if flag missing (caught in tests)
 	createCmd.Flags().String("id", "", "Explicit issue ID (e.g., 'bd-42' for partitioning)")
 	createCmd.Flags().String("parent", "", "Parent issue ID for hierarchical child (e.g., 'bd-a3f8e9')")
 	createCmd.Flags().StringSlice("deps", []string{}, "Dependencies in format 'type:id' or 'id' (e.g., 'discovered-from:bd-20,blocks:bd-15' or 'bd-20')")
+	createCmd.Flags().String("waits-for", "", "Spawner issue ID to wait for (creates waits-for dependency for fanout gate)")
+	createCmd.Flags().String("waits-for-gate", "all-children", "Gate type: all-children (wait for all) or any-children (wait for first)")
 	createCmd.Flags().Bool("force", false, "Force creation even if prefix doesn't match database prefix")
 	createCmd.Flags().String("repo", "", "Target repository for issue (overrides auto-routing)")
 	createCmd.Flags().IntP("estimate", "e", 0, "Time estimate in minutes (e.g., 60 for 1 hour)")

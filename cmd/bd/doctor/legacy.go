@@ -43,14 +43,14 @@ func CheckLegacyBeadsSlashCommands(repoPath string) DoctorCheck {
 
 	if len(filesWithLegacyCommands) == 0 {
 		return DoctorCheck{
-			Name:    "Documentation",
+			Name:    "Legacy Commands",
 			Status:  "ok",
 			Message: "No legacy beads slash commands detected",
 		}
 	}
 
 	return DoctorCheck{
-		Name:    "Integration Pattern",
+		Name:    "Legacy Commands",
 		Status:  "warning",
 		Message: fmt.Sprintf("Old beads integration detected in %s", strings.Join(filesWithLegacyCommands, ", ")),
 		Detail:  "Found: /beads:* slash command references (deprecated)\n" +
@@ -188,7 +188,7 @@ func CheckLegacyJSONLFilename(repoPath string) DoctorCheck {
 		Detail:  "Having multiple JSONL files can cause sync and merge conflicts.\n" +
 			"  Only one JSONL file should be used per repository.",
 		Fix: "Determine which file is current and remove the others:\n" +
-			"  1. Check 'bd stats' to see which file is being used\n" +
+			"  1. Check .beads/metadata.json for 'jsonl_export' setting\n" +
 			"  2. Verify with 'git log .beads/*.jsonl' to see commit history\n" +
 			"  3. Remove the unused file(s): git rm .beads/<unused>.jsonl\n" +
 			"  4. Commit the change",

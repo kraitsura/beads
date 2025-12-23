@@ -114,37 +114,23 @@ func TestParentChildValidation(t *testing.T) {
 }
 
 func TestRemoveDependency(t *testing.T) {
-	store, cleanup := setupTestDB(t)
-	defer cleanup()
+	env := newTestEnv(t)
 
-	ctx := context.Background()
-
-	// Create and link issues
-	issue1 := &types.Issue{Title: "First", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
-	issue2 := &types.Issue{Title: "Second", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
-
-	store.CreateIssue(ctx, issue1, "test-user")
-	store.CreateIssue(ctx, issue2, "test-user")
-
-	dep := &types.Dependency{
-		IssueID:     issue2.ID,
-		DependsOnID: issue1.ID,
-		Type:        types.DepBlocks,
-	}
-	store.AddDependency(ctx, dep, "test-user")
+	issue1 := env.CreateIssue("First")
+	issue2 := env.CreateIssue("Second")
+	env.AddDep(issue2, issue1)
 
 	// Remove the dependency
-	err := store.RemoveDependency(ctx, issue2.ID, issue1.ID, "test-user")
+	err := env.Store.RemoveDependency(env.Ctx, issue2.ID, issue1.ID, "test-user")
 	if err != nil {
 		t.Fatalf("RemoveDependency failed: %v", err)
 	}
 
 	// Verify dependency was removed
-	deps, err := store.GetDependencies(ctx, issue2.ID)
+	deps, err := env.Store.GetDependencies(env.Ctx, issue2.ID)
 	if err != nil {
 		t.Fatalf("GetDependencies failed: %v", err)
 	}
-
 	if len(deps) != 0 {
 		t.Errorf("Expected 0 dependencies after removal, got %d", len(deps))
 	}
@@ -192,29 +178,21 @@ func TestAddDependencyPreservesProvidedMetadata(t *testing.T) {
 }
 
 func TestGetDependents(t *testing.T) {
-	store, cleanup := setupTestDB(t)
-	defer cleanup()
+	env := newTestEnv(t)
 
-	ctx := context.Background()
+	// Create issues: issue2 and issue3 both depend on issue1
+	issue1 := env.CreateIssue("Foundation")
+	issue2 := env.CreateIssue("Feature A")
+	issue3 := env.CreateIssue("Feature B")
 
-	// Create issues: bd-2 and bd-3 both depend on bd-1
-	issue1 := &types.Issue{Title: "Foundation", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
-	issue2 := &types.Issue{Title: "Feature A", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
-	issue3 := &types.Issue{Title: "Feature B", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
-
-	store.CreateIssue(ctx, issue1, "test-user")
-	store.CreateIssue(ctx, issue2, "test-user")
-	store.CreateIssue(ctx, issue3, "test-user")
-
-	store.AddDependency(ctx, &types.Dependency{IssueID: issue2.ID, DependsOnID: issue1.ID, Type: types.DepBlocks}, "test-user")
-	store.AddDependency(ctx, &types.Dependency{IssueID: issue3.ID, DependsOnID: issue1.ID, Type: types.DepBlocks}, "test-user")
+	env.AddDep(issue2, issue1)
+	env.AddDep(issue3, issue1)
 
 	// Get dependents of issue1
-	dependents, err := store.GetDependents(ctx, issue1.ID)
+	dependents, err := env.Store.GetDependents(env.Ctx, issue1.ID)
 	if err != nil {
 		t.Fatalf("GetDependents failed: %v", err)
 	}
-
 	if len(dependents) != 2 {
 		t.Fatalf("Expected 2 dependents, got %d", len(dependents))
 	}
@@ -224,36 +202,27 @@ func TestGetDependents(t *testing.T) {
 	for _, dep := range dependents {
 		foundIDs[dep.ID] = true
 	}
-
 	if !foundIDs[issue2.ID] || !foundIDs[issue3.ID] {
 		t.Errorf("Expected dependents %s and %s", issue2.ID, issue3.ID)
 	}
 }
 
 func TestGetDependencyTree(t *testing.T) {
-	store, cleanup := setupTestDB(t)
-	defer cleanup()
+	env := newTestEnv(t)
 
-	ctx := context.Background()
+	// Create a chain: issue3 → issue2 → issue1
+	issue1 := env.CreateIssue("Level 0")
+	issue2 := env.CreateIssue("Level 1")
+	issue3 := env.CreateIssue("Level 2")
 
-	// Create a chain: bd-3 → bd-2 → bd-1
-	issue1 := &types.Issue{Title: "Level 0", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
-	issue2 := &types.Issue{Title: "Level 1", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
-	issue3 := &types.Issue{Title: "Level 2", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
-
-	store.CreateIssue(ctx, issue1, "test-user")
-	store.CreateIssue(ctx, issue2, "test-user")
-	store.CreateIssue(ctx, issue3, "test-user")
-
-	store.AddDependency(ctx, &types.Dependency{IssueID: issue2.ID, DependsOnID: issue1.ID, Type: types.DepBlocks}, "test-user")
-	store.AddDependency(ctx, &types.Dependency{IssueID: issue3.ID, DependsOnID: issue2.ID, Type: types.DepBlocks}, "test-user")
+	env.AddDep(issue2, issue1)
+	env.AddDep(issue3, issue2)
 
 	// Get tree starting from issue3
-	tree, err := store.GetDependencyTree(ctx, issue3.ID, 10, false, false)
+	tree, err := env.Store.GetDependencyTree(env.Ctx, issue3.ID, 10, false, false)
 	if err != nil {
 		t.Fatalf("GetDependencyTree failed: %v", err)
 	}
-
 	if len(tree) != 3 {
 		t.Fatalf("Expected 3 nodes in tree, got %d", len(tree))
 	}
@@ -263,15 +232,12 @@ func TestGetDependencyTree(t *testing.T) {
 	for _, node := range tree {
 		depthMap[node.ID] = node.Depth
 	}
-
 	if depthMap[issue3.ID] != 0 {
 		t.Errorf("Expected depth 0 for %s, got %d", issue3.ID, depthMap[issue3.ID])
 	}
-
 	if depthMap[issue2.ID] != 1 {
 		t.Errorf("Expected depth 1 for %s, got %d", issue2.ID, depthMap[issue2.ID])
 	}
-
 	if depthMap[issue1.ID] != 2 {
 		t.Errorf("Expected depth 2 for %s, got %d", issue1.ID, depthMap[issue1.ID])
 	}
@@ -1527,9 +1493,10 @@ func TestDetectCycles_MultipleGraphs(t *testing.T) {
 	}
 }
 
-// TestDetectCycles_RelatedTypeAllowsAdditionButReportsDetection tests relates-to allows bidirectional links
-// even though they're technically cycles. The cycle prevention only skips relates-to during AddDependency.
-func TestDetectCycles_RelatedTypeAllowsAdditionButReportsDetection(t *testing.T) {
+// TestDetectCycles_RelatesTypeAllowsBidirectionalWithoutCycleReport tests relates-to allows bidirectional links
+// and DetectCycles correctly excludes them (they're "see also" links, not problematic cycles).
+// This was fixed in GH#661 - relates-to is explicitly excluded from cycle detection.
+func TestDetectCycles_RelatesTypeAllowsBidirectionalWithoutCycleReport(t *testing.T) {
 	store, cleanup := setupTestDB(t)
 	defer cleanup()
 
@@ -1552,7 +1519,7 @@ func TestDetectCycles_RelatedTypeAllowsAdditionButReportsDetection(t *testing.T)
 		t.Fatalf("AddDependency for relates-to failed: %v", err)
 	}
 
-	// Add B relates-to A (this should succeed despite creating a cycle because relates-to skips cycle detection)
+	// Add B relates-to A (this should succeed - relates-to skips cycle prevention)
 	err = store.AddDependency(ctx, &types.Dependency{
 		IssueID:     issueB.ID,
 		DependsOnID: issueA.ID,
@@ -1562,15 +1529,16 @@ func TestDetectCycles_RelatedTypeAllowsAdditionButReportsDetection(t *testing.T)
 		t.Fatalf("AddDependency for reverse relates-to failed: %v", err)
 	}
 
-	// DetectCycles will report the cycle even though AddDependency allowed it
+	// DetectCycles should NOT report relates-to as cycles (GH#661 fix)
+	// relates-to is inherently bidirectional ("see also") and doesn't affect work ordering
 	cycles, err := store.DetectCycles(ctx)
 	if err != nil {
 		t.Fatalf("DetectCycles failed: %v", err)
 	}
 
-	// Relates-to bidirectional creates cycles (may report multiple entry points for same cycle)
-	if len(cycles) == 0 {
-		t.Error("Expected at least 1 cycle detected for bidirectional relates-to")
+	// relates-to bidirectional should NOT be reported as a cycle
+	if len(cycles) != 0 {
+		t.Errorf("Expected 0 cycles for bidirectional relates-to (GH#661 fix), got %d", len(cycles))
 	}
 
 	// Verify both directions exist
@@ -1606,5 +1574,210 @@ func TestDetectCycles_RelatedTypeAllowsAdditionButReportsDetection(t *testing.T)
 	}
 	if !hasA {
 		t.Error("Expected B to relate-to A")
+	}
+}
+
+// TestRemoveDependencyExternal verifies that removing an external dependency
+// doesn't cause FK violation (bd-a3sj). External refs like external:project:capability
+// don't exist in the issues table, so we must not mark them as dirty.
+func TestRemoveDependencyExternal(t *testing.T) {
+	store, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// Create an issue
+	issue := &types.Issue{
+		Title:     "Issue with external dep",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, issue, "test-user"); err != nil {
+		t.Fatalf("CreateIssue failed: %v", err)
+	}
+
+	// Add an external dependency
+	externalRef := "external:other-project:some-capability"
+	dep := &types.Dependency{
+		IssueID:     issue.ID,
+		DependsOnID: externalRef,
+		Type:        types.DepBlocks,
+	}
+	if err := store.AddDependency(ctx, dep, "test-user"); err != nil {
+		t.Fatalf("AddDependency failed: %v", err)
+	}
+
+	// This should NOT cause FK violation (the bug was marking external ref as dirty)
+	err := store.RemoveDependency(ctx, issue.ID, externalRef, "test-user")
+	if err != nil {
+		t.Fatalf("RemoveDependency on external ref should succeed, got: %v", err)
+	}
+
+	// Verify dependency was actually removed
+	deps, err := store.GetDependencyRecords(ctx, issue.ID)
+	if err != nil {
+		t.Fatalf("GetDependencyRecords failed: %v", err)
+	}
+	if len(deps) != 0 {
+		t.Errorf("Expected 0 dependencies after removal, got %d", len(deps))
+	}
+}
+
+// TestGetDependencyTreeExternalDeps verifies that external dependencies
+// appear in the dependency tree as synthetic leaf nodes (bd-vks2).
+func TestGetDependencyTreeExternalDeps(t *testing.T) {
+	store, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// Create a root issue
+	root := &types.Issue{
+		Title:     "Root issue",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, root, "test-user"); err != nil {
+		t.Fatalf("CreateIssue failed: %v", err)
+	}
+
+	// Create a blocking local issue
+	blocker := &types.Issue{
+		Title:     "Local blocker",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, blocker, "test-user"); err != nil {
+		t.Fatalf("CreateIssue failed: %v", err)
+	}
+
+	// Add local dependency
+	localDep := &types.Dependency{
+		IssueID:     root.ID,
+		DependsOnID: blocker.ID,
+		Type:        types.DepBlocks,
+	}
+	if err := store.AddDependency(ctx, localDep, "test-user"); err != nil {
+		t.Fatalf("AddDependency (local) failed: %v", err)
+	}
+
+	// Add external dependency to root
+	extRef := "external:test-project:test-capability"
+	extDep := &types.Dependency{
+		IssueID:     root.ID,
+		DependsOnID: extRef,
+		Type:        types.DepBlocks,
+	}
+	if err := store.AddDependency(ctx, extDep, "test-user"); err != nil {
+		t.Fatalf("AddDependency (external) failed: %v", err)
+	}
+
+	// Get dependency tree
+	tree, err := store.GetDependencyTree(ctx, root.ID, 10, false, false)
+	if err != nil {
+		t.Fatalf("GetDependencyTree failed: %v", err)
+	}
+
+	// Should have 3 nodes: root, local blocker, and external dep
+	if len(tree) != 3 {
+		t.Errorf("Expected 3 nodes in tree (root, local, external), got %d", len(tree))
+		for _, node := range tree {
+			t.Logf("Node: id=%s title=%s depth=%d", node.ID, node.Title, node.Depth)
+		}
+	}
+
+	// Find the external dep node
+	var extNode *types.TreeNode
+	for _, node := range tree {
+		if node.ID == extRef {
+			extNode = node
+			break
+		}
+	}
+
+	if extNode == nil {
+		t.Fatal("External dependency not found in tree")
+	}
+
+	// Verify external node properties
+	if extNode.Depth != 1 {
+		t.Errorf("Expected external dep at depth 1, got %d", extNode.Depth)
+	}
+	if extNode.ParentID != root.ID {
+		t.Errorf("Expected external dep parent to be root, got %s", extNode.ParentID)
+	}
+	// External deps should show blocked status when not configured
+	if extNode.Status != types.StatusBlocked {
+		t.Errorf("Expected external dep status to be blocked (not configured), got %s", extNode.Status)
+	}
+}
+
+// TestCycleDetectionWithExternalRefs verifies that external dependencies
+// don't participate in cycle detection (they can't form cycles with local issues).
+func TestCycleDetectionWithExternalRefs(t *testing.T) {
+	store, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	// Create two issues
+	issueA := &types.Issue{
+		Title:     "Issue A",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, issueA, "test-user"); err != nil {
+		t.Fatalf("CreateIssue A failed: %v", err)
+	}
+
+	issueB := &types.Issue{
+		Title:     "Issue B",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, issueB, "test-user"); err != nil {
+		t.Fatalf("CreateIssue B failed: %v", err)
+	}
+
+	// A depends on B
+	if err := store.AddDependency(ctx, &types.Dependency{
+		IssueID:     issueA.ID,
+		DependsOnID: issueB.ID,
+		Type:        types.DepBlocks,
+	}, "test-user"); err != nil {
+		t.Fatalf("AddDependency A->B failed: %v", err)
+	}
+
+	// B depends on external ref (should succeed - external refs don't form cycles)
+	extRef := "external:project:capability"
+	if err := store.AddDependency(ctx, &types.Dependency{
+		IssueID:     issueB.ID,
+		DependsOnID: extRef,
+		Type:        types.DepBlocks,
+	}, "test-user"); err != nil {
+		t.Fatalf("AddDependency B->external failed: %v", err)
+	}
+
+	// A depends on same external ref (should also succeed - no cycle with external)
+	if err := store.AddDependency(ctx, &types.Dependency{
+		IssueID:     issueA.ID,
+		DependsOnID: extRef,
+		Type:        types.DepBlocks,
+	}, "test-user"); err != nil {
+		t.Fatalf("AddDependency A->external failed: %v", err)
+	}
+
+	// Verify DetectCycles doesn't find any cycles
+	cycles, err := store.DetectCycles(ctx)
+	if err != nil {
+		t.Fatalf("DetectCycles failed: %v", err)
+	}
+	if len(cycles) != 0 {
+		t.Errorf("Expected no cycles with external deps, got %d", len(cycles))
 	}
 }

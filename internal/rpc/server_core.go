@@ -57,6 +57,7 @@ type Server struct {
 	// Daemon configuration (set via SetConfig after creation)
 	autoCommit   bool
 	autoPush     bool
+	autoPull     bool
 	localMode    bool
 	syncInterval string
 	daemonMode   string
@@ -68,13 +69,23 @@ const (
 	MutationUpdate  = "update"
 	MutationDelete  = "delete"
 	MutationComment = "comment"
+	// Molecule-specific event types for activity feed
+	MutationBonded   = "bonded"   // Molecule bonded to parent (dynamic bond)
+	MutationSquashed = "squashed" // Wisp squashed to digest
+	MutationBurned   = "burned"   // Wisp discarded without digest
+	MutationStatus   = "status"   // Status change (in_progress, completed, failed)
 )
 
 // MutationEvent represents a database mutation for event-driven sync
 type MutationEvent struct {
-	Type      string    // One of: MutationCreate, MutationUpdate, MutationDelete, MutationComment
+	Type      string    // One of the Mutation* constants
 	IssueID   string    // e.g., "bd-42"
 	Timestamp time.Time
+	// Optional metadata for richer events (used by status, bonded, etc.)
+	OldStatus string `json:"old_status,omitempty"` // Previous status (for status events)
+	NewStatus string `json:"new_status,omitempty"` // New status (for status events)
+	ParentID  string `json:"parent_id,omitempty"`  // Parent molecule (for bonded events)
+	StepCount int    `json:"step_count,omitempty"` // Number of steps (for bonded events)
 }
 
 // NewServer creates a new RPC server
@@ -128,10 +139,19 @@ func NewServer(socketPath string, store storage.Storage, workspacePath string, d
 // Non-blocking: drops event if channel is full (sync will happen eventually).
 // Also stores in recent mutations buffer for polling.
 func (s *Server) emitMutation(eventType, issueID string) {
-	event := MutationEvent{
-		Type:      eventType,
-		IssueID:   issueID,
-		Timestamp: time.Now(),
+	s.emitRichMutation(MutationEvent{
+		Type:    eventType,
+		IssueID: issueID,
+	})
+}
+
+// emitRichMutation sends a pre-built mutation event with optional metadata.
+// Use this for events that include additional context (status changes, bonded events, etc.)
+// Non-blocking: drops event if channel is full (sync will happen eventually).
+func (s *Server) emitRichMutation(event MutationEvent) {
+	// Always set timestamp if not provided
+	if event.Timestamp.IsZero() {
+		event.Timestamp = time.Now()
 	}
 
 	// Send to mutation channel for daemon
@@ -159,11 +179,12 @@ func (s *Server) MutationChan() <-chan MutationEvent {
 }
 
 // SetConfig sets the daemon configuration for status reporting
-func (s *Server) SetConfig(autoCommit, autoPush, localMode bool, syncInterval, daemonMode string) {
+func (s *Server) SetConfig(autoCommit, autoPush, autoPull, localMode bool, syncInterval, daemonMode string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.autoCommit = autoCommit
 	s.autoPush = autoPush
+	s.autoPull = autoPull
 	s.localMode = localMode
 	s.syncInterval = syncInterval
 	s.daemonMode = daemonMode

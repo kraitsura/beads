@@ -13,7 +13,7 @@ import (
 func TestStatusEndpoint(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")
-	socketPath := filepath.Join(tmpDir, "test.sock")
+	socketPath := newTestSocketPath(t)
 
 	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
@@ -87,8 +87,7 @@ func TestStatusEndpoint(t *testing.T) {
 func TestStatusEndpointWithConfig(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")
-	socketPath := filepath.Join(tmpDir, "test.sock")
-
+	socketPath := newTestSocketPath(t)
 	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("failed to create storage: %v", err)
@@ -98,7 +97,7 @@ func TestStatusEndpointWithConfig(t *testing.T) {
 	server := NewServer(socketPath, store, tmpDir, dbPath)
 
 	// Set config before starting
-	server.SetConfig(true, true, false, "10s", "events")
+	server.SetConfig(true, true, true, false, "10s", "events")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -146,8 +145,7 @@ func TestStatusEndpointWithConfig(t *testing.T) {
 func TestStatusEndpointLocalMode(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")
-	socketPath := filepath.Join(tmpDir, "test.sock")
-
+	socketPath := newTestSocketPath(t)
 	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("failed to create storage: %v", err)
@@ -157,7 +155,7 @@ func TestStatusEndpointLocalMode(t *testing.T) {
 	server := NewServer(socketPath, store, tmpDir, dbPath)
 
 	// Set config for local mode
-	server.SetConfig(false, false, true, "5s", "poll")
+	server.SetConfig(false, false, false, true, "5s", "poll")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -205,7 +203,7 @@ func TestStatusEndpointLocalMode(t *testing.T) {
 func TestStatusEndpointDefaultConfig(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")
-	socketPath := filepath.Join(tmpDir, "test.sock")
+	socketPath := newTestSocketPath(t)
 
 	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
@@ -262,7 +260,7 @@ func TestStatusEndpointDefaultConfig(t *testing.T) {
 func TestSetConfigConcurrency(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")
-	socketPath := filepath.Join(tmpDir, "test.sock")
+	socketPath := newTestSocketPath(t)
 
 	store, err := sqlite.New(context.Background(), dbPath)
 	if err != nil {
@@ -286,7 +284,7 @@ func TestSetConfigConcurrency(t *testing.T) {
 	done := make(chan bool)
 	for i := 0; i < 10; i++ {
 		go func(n int) {
-			server.SetConfig(n%2 == 0, n%3 == 0, n%4 == 0, "5s", "events")
+			server.SetConfig(n%2 == 0, n%3 == 0, n%5 == 0, n%4 == 0, "5s", "events")
 			done <- true
 		}(i)
 	}

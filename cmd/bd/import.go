@@ -3,12 +3,13 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -21,8 +22,9 @@ import (
 )
 
 var importCmd = &cobra.Command{
-	Use:   "import",
-	Short: "Import issues from JSONL format",
+	Use:     "import",
+	GroupID: "sync",
+	Short:   "Import issues from JSONL format",
 	Long: `Import issues from JSON Lines format (one JSON object per line).
 
 Reads from stdin by default, or use -i flag for file input.
@@ -205,6 +207,7 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 				fmt.Fprintf(os.Stderr, "Error parsing line %d: %v\n", lineNum, err)
 				os.Exit(1)
 			}
+			issue.SetDefaults() // Apply defaults for omitted fields (beads-399)
 
 			allIssues = append(allIssues, &issue)
 		}
@@ -357,8 +360,8 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 			for oldID, newID := range result.IDMapping {
 				mappings = append(mappings, mapping{oldID, newID})
 			}
-			sort.Slice(mappings, func(i, j int) bool {
-				return mappings[i].oldID < mappings[j].oldID
+			slices.SortFunc(mappings, func(a, b mapping) int {
+				return cmp.Compare(a.oldID, b.oldID)
 			})
 
 			fmt.Fprintf(os.Stderr, "Remappings:\n")
@@ -372,7 +375,7 @@ NOTE: Import requires direct database access and does not work with daemon mode.
 		// Without this, daemon FileWatcher won't detect the import for up to 30s
 		// Only flush if there were actual changes to avoid unnecessary I/O
 		if result.Created > 0 || result.Updated > 0 || len(result.IDMapping) > 0 {
-			flushToJSONL()
+			flushToJSONLWithState(flushState{forceDirty: true})
 		}
 
 		// Update jsonl_content_hash metadata to enable content-based staleness detection (bd-khnb fix)

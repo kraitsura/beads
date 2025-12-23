@@ -11,30 +11,114 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/compact"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 )
 
 var (
-	compactDryRun   bool
-	compactTier     int
-	compactAll      bool
-	compactID       string
-	compactForce    bool
-	compactBatch    int
-	compactWorkers  int
-	compactStats    bool
-	compactAnalyze  bool
-	compactApply    bool
-	compactAuto     bool
-	compactSummary  string
-	compactActor    string
-	compactLimit int
+	compactDryRun  bool
+	compactTier    int
+	compactAll     bool
+	compactID      string
+	compactForce   bool
+	compactBatch   int
+	compactWorkers int
+	compactStats   bool
+	compactAnalyze bool
+	compactApply   bool
+	compactAuto    bool
+	compactSummary string
+	compactActor   string
+	compactAudit   bool
+	compactLimit   int
 )
 
+// JSON response types for compact command output
+
+// CompactDryRunResponse is returned for --dry-run mode
+type CompactDryRunResponse struct {
+	DryRun            bool   `json:"dry_run"`
+	Tier              int    `json:"tier"`
+	IssueID           string `json:"issue_id,omitempty"`
+	OriginalSize      int    `json:"original_size,omitempty"`
+	CandidateCount    int    `json:"candidate_count,omitempty"`
+	TotalSizeBytes    int    `json:"total_size_bytes,omitempty"`
+	EstimatedReduction string `json:"estimated_reduction"`
+}
+
+// CompactSuccessResponse is returned for successful single-issue compaction
+type CompactSuccessResponse struct {
+	Success       bool    `json:"success"`
+	Tier          int     `json:"tier"`
+	IssueID       string  `json:"issue_id"`
+	OriginalSize  int     `json:"original_size"`
+	CompactedSize int     `json:"compacted_size"`
+	SavedBytes    int     `json:"saved_bytes"`
+	ReductionPct  float64 `json:"reduction_pct"`
+	ElapsedMs     int64   `json:"elapsed_ms"`
+}
+
+// CompactNoCandidatesResponse is returned when no candidates are found
+type CompactNoCandidatesResponse struct {
+	Success bool   `json:"success"`
+	Count   int    `json:"count"`
+	Message string `json:"message"`
+}
+
+// CompactBatchSuccessResponse is returned for successful batch compaction
+type CompactBatchSuccessResponse struct {
+	Success      bool  `json:"success"`
+	Tier         int   `json:"tier"`
+	Total        int   `json:"total"`
+	Succeeded    int   `json:"succeeded"`
+	Failed       int   `json:"failed"`
+	SavedBytes   int   `json:"saved_bytes"`
+	OriginalSize int   `json:"original_size"`
+	ElapsedMs    int64 `json:"elapsed_ms"`
+}
+
+// CompactTierStats holds statistics for a compaction tier
+type CompactTierStats struct {
+	Candidates int `json:"candidates"`
+	TotalSize  int `json:"total_size"`
+}
+
+// CompactStatsResponse is returned for --stats mode
+type CompactStatsResponse struct {
+	Tier1 CompactTierStats `json:"tier1"`
+	Tier2 CompactTierStats `json:"tier2"`
+}
+
+// TombstonePrunedInfo holds info about pruned tombstones
+type TombstonePrunedInfo struct {
+	Count   int `json:"count"`
+	TTLDays int `json:"ttl_days"`
+}
+
+// CompactApplyResponse is returned for --apply mode
+type CompactApplyResponse struct {
+	Success          bool                 `json:"success"`
+	IssueID          string               `json:"issue_id"`
+	Tier             int                  `json:"tier"`
+	OriginalSize     int                  `json:"original_size"`
+	CompactedSize    int                  `json:"compacted_size"`
+	SavedBytes       int                  `json:"saved_bytes"`
+	ReductionPct     float64              `json:"reduction_pct"`
+	ElapsedMs        int64                `json:"elapsed_ms"`
+	TombstonesPruned *TombstonePrunedInfo `json:"tombstones_pruned,omitempty"`
+}
+
+// showCompactDeprecationHint shows a hint about bd doctor consolidation (bd-bqcc)
+func showCompactDeprecationHint() {
+	fmt.Fprintln(os.Stderr, ui.RenderMuted("💡 Tip: 'bd doctor' now shows compaction candidates in the Maintenance section"))
+}
+
 var compactCmd = &cobra.Command{
-	Use:   "compact",
-	Short: "Compact old closed issues to save space",
+	Use:     "compact",
+	GroupID: "maint",
+	Short:   "Compact old closed issues to save space",
 	Long: `Compact old closed issues using semantic summarization.
 
 Compaction reduces database size by summarizing closed issues that are no longer
@@ -68,7 +152,7 @@ Examples:
   # Statistics
   bd compact --stats                       # Show statistics
 `,
-	Run: func(_ *cobra.Command, _ []string) {
+	Run: func(cmd *cobra.Command, _ []string) {
 		// Compact modifies data unless --stats or --analyze or --dry-run
 		if !compactStats && !compactAnalyze && !compactDryRun {
 			CheckReadonly("compact")
@@ -82,8 +166,7 @@ Examples:
 			} else {
 				sqliteStore, ok := store.(*sqlite.SQLiteStorage)
 				if !ok {
-					fmt.Fprintf(os.Stderr, "Error: compact requires SQLite storage\n")
-					os.Exit(1)
+					FatalError("compact requires SQLite storage")
 				}
 				runCompactStats(ctx, sqliteStore)
 			}
@@ -104,26 +187,20 @@ Examples:
 
 		// Check for exactly one mode
 		if activeModes == 0 {
-			fmt.Fprintf(os.Stderr, "Error: must specify one mode: --analyze, --apply, or --auto\n")
-			os.Exit(1)
+			FatalError("must specify one mode: --analyze, --apply, or --auto")
 		}
 		if activeModes > 1 {
-			fmt.Fprintf(os.Stderr, "Error: cannot use multiple modes together (--analyze, --apply, --auto are mutually exclusive)\n")
-			os.Exit(1)
+			FatalError("cannot use multiple modes together (--analyze, --apply, --auto are mutually exclusive)")
 		}
 
 		// Handle analyze mode (requires direct database access)
 		if compactAnalyze {
 			if err := ensureDirectMode("compact --analyze requires direct database access"); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				fmt.Fprintf(os.Stderr, "Hint: Use --no-daemon flag to bypass daemon and access database directly\n")
-				os.Exit(1)
+				FatalErrorWithHint(fmt.Sprintf("%v", err), "Use --no-daemon flag to bypass daemon and access database directly")
 			}
 			sqliteStore, ok := store.(*sqlite.SQLiteStorage)
 			if !ok {
-				fmt.Fprintf(os.Stderr, "Error: failed to open database in direct mode\n")
-				fmt.Fprintf(os.Stderr, "Hint: Ensure .beads/beads.db exists and is readable\n")
-				os.Exit(1)
+				FatalErrorWithHint("failed to open database in direct mode", "Ensure .beads/beads.db exists and is readable")
 			}
 			runCompactAnalyze(ctx, sqliteStore)
 			return
@@ -132,23 +209,17 @@ Examples:
 		// Handle apply mode (requires direct database access)
 		if compactApply {
 			if err := ensureDirectMode("compact --apply requires direct database access"); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				fmt.Fprintf(os.Stderr, "Hint: Use --no-daemon flag to bypass daemon and access database directly\n")
-				os.Exit(1)
+				FatalErrorWithHint(fmt.Sprintf("%v", err), "Use --no-daemon flag to bypass daemon and access database directly")
 			}
 			if compactID == "" {
-				fmt.Fprintf(os.Stderr, "Error: --apply requires --id\n")
-				os.Exit(1)
+				FatalError("--apply requires --id")
 			}
 			if compactSummary == "" {
-				fmt.Fprintf(os.Stderr, "Error: --apply requires --summary\n")
-				os.Exit(1)
+				FatalError("--apply requires --summary")
 			}
 			sqliteStore, ok := store.(*sqlite.SQLiteStorage)
 			if !ok {
-				fmt.Fprintf(os.Stderr, "Error: failed to open database in direct mode\n")
-				fmt.Fprintf(os.Stderr, "Hint: Ensure .beads/beads.db exists and is readable\n")
-				os.Exit(1)
+				FatalErrorWithHint("failed to open database in direct mode", "Ensure .beads/beads.db exists and is readable")
 			}
 			runCompactApply(ctx, sqliteStore)
 			return
@@ -156,18 +227,21 @@ Examples:
 
 		// Handle auto mode (legacy)
 		if compactAuto {
+			// If --audit not explicitly set, fall back to config audit.enabled
+			auditEnabled := compactAudit
+			if !cmd.Flags().Changed("audit") {
+				auditEnabled = config.GetBool("audit.enabled")
+			}
+
 			// Validation checks
 			if compactID != "" && compactAll {
-				fmt.Fprintf(os.Stderr, "Error: cannot use --id and --all together\n")
-				os.Exit(1)
+				FatalError("cannot use --id and --all together")
 			}
 			if compactForce && compactID == "" {
-				fmt.Fprintf(os.Stderr, "Error: --force requires --id\n")
-				os.Exit(1)
+				FatalError("--force requires --id")
 			}
 			if compactID == "" && !compactAll && !compactDryRun {
-				fmt.Fprintf(os.Stderr, "Error: must specify --all, --id, or --dry-run\n")
-				os.Exit(1)
+				FatalError("must specify --all, --id, or --dry-run")
 			}
 
 			// Use RPC if daemon available, otherwise direct mode
@@ -179,26 +253,25 @@ Examples:
 			// Fallback to direct mode
 			apiKey := os.Getenv("ANTHROPIC_API_KEY")
 			if apiKey == "" && !compactDryRun {
-				fmt.Fprintf(os.Stderr, "Error: --auto mode requires ANTHROPIC_API_KEY environment variable\n")
-				os.Exit(1)
+				FatalError("--auto mode requires ANTHROPIC_API_KEY environment variable")
 			}
 
 			sqliteStore, ok := store.(*sqlite.SQLiteStorage)
 			if !ok {
-				fmt.Fprintf(os.Stderr, "Error: compact requires SQLite storage\n")
-				os.Exit(1)
+				FatalError("compact requires SQLite storage")
 			}
 
 			config := &compact.Config{
-				APIKey:      apiKey,
-				Concurrency: compactWorkers,
-				DryRun:      compactDryRun,
+				APIKey:       apiKey,
+				Concurrency:  compactWorkers,
+				DryRun:       compactDryRun,
+				AuditEnabled: auditEnabled,
+				Actor:        compactActor,
 			}
 
 			compactor, err := compact.New(sqliteStore, apiKey, config)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: failed to create compactor: %v\n", err)
-				os.Exit(1)
+				FatalError("failed to create compactor: %v", err)
 			}
 
 			if compactID != "" {
@@ -217,33 +290,29 @@ func runCompactSingle(ctx context.Context, compactor *compact.Compactor, store *
 	if !compactForce {
 		eligible, reason, err := store.CheckEligibility(ctx, issueID, compactTier)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: failed to check eligibility: %v\n", err)
-			os.Exit(1)
+			FatalError("failed to check eligibility: %v", err)
 		}
 		if !eligible {
-			fmt.Fprintf(os.Stderr, "Error: %s is not eligible for Tier %d compaction: %s\n", issueID, compactTier, reason)
-			os.Exit(1)
+			FatalError("%s is not eligible for Tier %d compaction: %s", issueID, compactTier, reason)
 		}
 	}
 
 	issue, err := store.GetIssue(ctx, issueID)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: failed to get issue: %v\n", err)
-		os.Exit(1)
+		FatalError("failed to get issue: %v", err)
 	}
 
 	originalSize := len(issue.Description) + len(issue.Design) + len(issue.Notes) + len(issue.AcceptanceCriteria)
 
 	if compactDryRun {
 		if jsonOutput {
-			output := map[string]interface{}{
-				"dry_run":             true,
-				"tier":                compactTier,
-				"issue_id":            issueID,
-				"original_size":       originalSize,
-				"estimated_reduction": "70-80%",
-			}
-			outputJSON(output)
+			outputJSON(CompactDryRunResponse{
+				DryRun:             true,
+				Tier:               compactTier,
+				IssueID:            issueID,
+				OriginalSize:       originalSize,
+				EstimatedReduction: "70-80%",
+			})
 			return
 		}
 
@@ -258,19 +327,16 @@ func runCompactSingle(ctx context.Context, compactor *compact.Compactor, store *
 	if compactTier == 1 {
 		compactErr = compactor.CompactTier1(ctx, issueID)
 	} else {
-		fmt.Fprintf(os.Stderr, "Error: Tier 2 compaction not yet implemented\n")
-		os.Exit(1)
+		FatalError("Tier 2 compaction not yet implemented")
 	}
 
 	if compactErr != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", compactErr)
-		os.Exit(1)
+		FatalError("%v", compactErr)
 	}
 
 	issue, err = store.GetIssue(ctx, issueID)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: failed to get updated issue: %v\n", err)
-		os.Exit(1)
+		FatalError("failed to get updated issue: %v", err)
 	}
 
 	compactedSize := len(issue.Description)
@@ -278,17 +344,16 @@ func runCompactSingle(ctx context.Context, compactor *compact.Compactor, store *
 	elapsed := time.Since(start)
 
 	if jsonOutput {
-		output := map[string]interface{}{
-			"success":        true,
-			"tier":           compactTier,
-			"issue_id":       issueID,
-			"original_size":  originalSize,
-			"compacted_size": compactedSize,
-			"saved_bytes":    savingBytes,
-			"reduction_pct":  float64(savingBytes) / float64(originalSize) * 100,
-			"elapsed_ms":     elapsed.Milliseconds(),
-		}
-		outputJSON(output)
+		outputJSON(CompactSuccessResponse{
+			Success:       true,
+			Tier:          compactTier,
+			IssueID:       issueID,
+			OriginalSize:  originalSize,
+			CompactedSize: compactedSize,
+			SavedBytes:    savingBytes,
+			ReductionPct:  float64(savingBytes) / float64(originalSize) * 100,
+			ElapsedMs:     elapsed.Milliseconds(),
+		})
 		return
 	}
 
@@ -317,8 +382,7 @@ func runCompactAll(ctx context.Context, compactor *compact.Compactor, store *sql
 	if compactTier == 1 {
 		tier1, err := store.GetTier1Candidates(ctx)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: failed to get candidates: %v\n", err)
-			os.Exit(1)
+			FatalError("failed to get candidates: %v", err)
 		}
 		for _, c := range tier1 {
 			candidates = append(candidates, c.IssueID)
@@ -326,8 +390,7 @@ func runCompactAll(ctx context.Context, compactor *compact.Compactor, store *sql
 	} else {
 		tier2, err := store.GetTier2Candidates(ctx)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: failed to get candidates: %v\n", err)
-			os.Exit(1)
+			FatalError("failed to get candidates: %v", err)
 		}
 		for _, c := range tier2 {
 			candidates = append(candidates, c.IssueID)
@@ -336,10 +399,10 @@ func runCompactAll(ctx context.Context, compactor *compact.Compactor, store *sql
 
 	if len(candidates) == 0 {
 		if jsonOutput {
-			outputJSON(map[string]interface{}{
-				"success": true,
-				"count":   0,
-				"message": "No eligible candidates",
+			outputJSON(CompactNoCandidatesResponse{
+				Success: true,
+				Count:   0,
+				Message: "No eligible candidates",
 			})
 			return
 		}
@@ -358,14 +421,13 @@ func runCompactAll(ctx context.Context, compactor *compact.Compactor, store *sql
 		}
 
 		if jsonOutput {
-			output := map[string]interface{}{
-				"dry_run":             true,
-				"tier":                compactTier,
-				"candidate_count":     len(candidates),
-				"total_size_bytes":    totalSize,
-				"estimated_reduction": "70-80%",
-			}
-			outputJSON(output)
+			outputJSON(CompactDryRunResponse{
+				DryRun:             true,
+				Tier:               compactTier,
+				CandidateCount:     len(candidates),
+				TotalSizeBytes:     totalSize,
+				EstimatedReduction: "70-80%",
+			})
 			return
 		}
 
@@ -382,8 +444,7 @@ func runCompactAll(ctx context.Context, compactor *compact.Compactor, store *sql
 
 	results, err := compactor.CompactTier1Batch(ctx, candidates)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: batch compaction failed: %v\n", err)
-		os.Exit(1)
+		FatalError("batch compaction failed: %v", err)
 	}
 
 	successCount := 0
@@ -408,17 +469,16 @@ func runCompactAll(ctx context.Context, compactor *compact.Compactor, store *sql
 	elapsed := time.Since(start)
 
 	if jsonOutput {
-		output := map[string]interface{}{
-			"success":       true,
-			"tier":          compactTier,
-			"total":         len(results),
-			"succeeded":     successCount,
-			"failed":        failCount,
-			"saved_bytes":   totalSaved,
-			"original_size": totalOriginal,
-			"elapsed_ms":    elapsed.Milliseconds(),
-		}
-		outputJSON(output)
+		outputJSON(CompactBatchSuccessResponse{
+			Success:      true,
+			Tier:         compactTier,
+			Total:        len(results),
+			Succeeded:    successCount,
+			Failed:       failCount,
+			SavedBytes:   totalSaved,
+			OriginalSize: totalOriginal,
+			ElapsedMs:    elapsed.Milliseconds(),
+		})
 		return
 	}
 
@@ -447,14 +507,12 @@ func runCompactAll(ctx context.Context, compactor *compact.Compactor, store *sql
 func runCompactStats(ctx context.Context, store *sqlite.SQLiteStorage) {
 	tier1, err := store.GetTier1Candidates(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: failed to get Tier 1 candidates: %v\n", err)
-		os.Exit(1)
+		FatalError("failed to get Tier 1 candidates: %v", err)
 	}
 
 	tier2, err := store.GetTier2Candidates(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: failed to get Tier 2 candidates: %v\n", err)
-		os.Exit(1)
+		FatalError("failed to get Tier 2 candidates: %v", err)
 	}
 
 	tier1Size := 0
@@ -468,17 +526,16 @@ func runCompactStats(ctx context.Context, store *sqlite.SQLiteStorage) {
 	}
 
 	if jsonOutput {
-		output := map[string]interface{}{
-			"tier1": map[string]interface{}{
-				"candidates": len(tier1),
-				"total_size": tier1Size,
+		outputJSON(CompactStatsResponse{
+			Tier1: CompactTierStats{
+				Candidates: len(tier1),
+				TotalSize:  tier1Size,
 			},
-			"tier2": map[string]interface{}{
-				"candidates": len(tier2),
-				"total_size": tier2Size,
+			Tier2: CompactTierStats{
+				Candidates: len(tier2),
+				TotalSize:  tier2Size,
 			},
-		}
-		outputJSON(output)
+		})
 		return
 	}
 
@@ -496,6 +553,9 @@ func runCompactStats(ctx context.Context, store *sqlite.SQLiteStorage) {
 	if tier2Size > 0 {
 		fmt.Printf("  Estimated savings: %d bytes (95%%)\n", tier2Size*95/100)
 	}
+
+	// bd-bqcc: Show hint about doctor consolidation
+	showCompactDeprecationHint()
 }
 
 func progressBar(current, total int) string {
@@ -518,24 +578,20 @@ func progressBar(current, total int) string {
 //nolint:unparam // ctx may be used in future for cancellation
 func runCompactRPC(_ context.Context) {
 	if compactID != "" && compactAll {
-		fmt.Fprintf(os.Stderr, "Error: cannot use --id and --all together\n")
-		os.Exit(1)
+		FatalError("cannot use --id and --all together")
 	}
 
 	if compactForce && compactID == "" {
-		fmt.Fprintf(os.Stderr, "Error: --force requires --id\n")
-		os.Exit(1)
+		FatalError("--force requires --id")
 	}
 
 	if compactID == "" && !compactAll && !compactDryRun {
-		fmt.Fprintf(os.Stderr, "Error: must specify --all, --id, or --dry-run\n")
-		os.Exit(1)
+		FatalError("must specify --all, --id, or --dry-run")
 	}
 
 	apiKey := os.Getenv("ANTHROPIC_API_KEY")
 	if apiKey == "" && !compactDryRun {
-		fmt.Fprintf(os.Stderr, "Error: ANTHROPIC_API_KEY environment variable not set\n")
-		os.Exit(1)
+		FatalError("ANTHROPIC_API_KEY environment variable not set")
 	}
 
 	args := map[string]interface{}{
@@ -553,13 +609,11 @@ func runCompactRPC(_ context.Context) {
 
 	resp, err := daemonClient.Execute("compact", args)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		FatalError("%v", err)
 	}
 
 	if !resp.Success {
-		fmt.Fprintf(os.Stderr, "Error: %s\n", resp.Error)
-		os.Exit(1)
+		FatalError("%s", resp.Error)
 	}
 
 	if jsonOutput {
@@ -586,8 +640,7 @@ func runCompactRPC(_ context.Context) {
 	}
 
 	if err := json.Unmarshal(resp.Data, &result); err != nil {
-		fmt.Fprintf(os.Stderr, "Error parsing response: %v\n", err)
-		os.Exit(1)
+		FatalError("parsing response: %v", err)
 	}
 
 	if compactID != "" {
@@ -632,13 +685,11 @@ func runCompactStatsRPC() {
 
 	resp, err := daemonClient.Execute("compact_stats", args)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		FatalError("%v", err)
 	}
 
 	if !resp.Success {
-		fmt.Fprintf(os.Stderr, "Error: %s\n", resp.Error)
-		os.Exit(1)
+		FatalError("%s", resp.Error)
 	}
 
 	if jsonOutput {
@@ -659,8 +710,7 @@ func runCompactStatsRPC() {
 	}
 
 	if err := json.Unmarshal(resp.Data, &result); err != nil {
-		fmt.Fprintf(os.Stderr, "Error parsing response: %v\n", err)
-		os.Exit(1)
+		FatalError("parsing response: %v", err)
 	}
 
 	fmt.Printf("\nCompaction Statistics\n")
@@ -694,8 +744,7 @@ func runCompactAnalyze(ctx context.Context, store *sqlite.SQLiteStorage) {
 	if compactID != "" {
 		issue, err := store.GetIssue(ctx, compactID)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: failed to get issue: %v\n", err)
-			os.Exit(1)
+			FatalError("failed to get issue: %v", err)
 		}
 
 		sizeBytes := len(issue.Description) + len(issue.Design) + len(issue.Notes) + len(issue.AcceptanceCriteria)
@@ -726,8 +775,7 @@ func runCompactAnalyze(ctx context.Context, store *sqlite.SQLiteStorage) {
 			tierCandidates, err = store.GetTier2Candidates(ctx)
 		}
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: failed to get candidates: %v\n", err)
-			os.Exit(1)
+			FatalError("failed to get candidates: %v", err)
 		}
 
 		// Apply limit if specified
@@ -789,15 +837,13 @@ func runCompactApply(ctx context.Context, store *sqlite.SQLiteStorage) {
 		// Read from stdin
 		summaryBytes, err = io.ReadAll(os.Stdin)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: failed to read summary from stdin: %v\n", err)
-			os.Exit(1)
+			FatalError("failed to read summary from stdin: %v", err)
 		}
 	} else {
 		// #nosec G304 -- summary file path provided explicitly by operator
 		summaryBytes, err = os.ReadFile(compactSummary)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: failed to read summary file: %v\n", err)
-			os.Exit(1)
+			FatalError("failed to read summary file: %v", err)
 		}
 	}
 	summary := string(summaryBytes)
@@ -805,8 +851,7 @@ func runCompactApply(ctx context.Context, store *sqlite.SQLiteStorage) {
 	// Get issue
 	issue, err := store.GetIssue(ctx, compactID)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: failed to get issue: %v\n", err)
-		os.Exit(1)
+		FatalError("failed to get issue: %v", err)
 	}
 
 	// Calculate sizes
@@ -817,20 +862,15 @@ func runCompactApply(ctx context.Context, store *sqlite.SQLiteStorage) {
 	if !compactForce {
 		eligible, reason, err := store.CheckEligibility(ctx, compactID, compactTier)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: failed to check eligibility: %v\n", err)
-			os.Exit(1)
+			FatalError("failed to check eligibility: %v", err)
 		}
 		if !eligible {
-			fmt.Fprintf(os.Stderr, "Error: %s is not eligible for Tier %d compaction: %s\n", compactID, compactTier, reason)
-			fmt.Fprintf(os.Stderr, "Hint: use --force to bypass eligibility checks\n")
-			os.Exit(1)
+			FatalErrorWithHint(fmt.Sprintf("%s is not eligible for Tier %d compaction: %s", compactID, compactTier, reason), "use --force to bypass eligibility checks")
 		}
 
 		// Enforce size reduction unless --force
 		if compactedSize >= originalSize {
-			fmt.Fprintf(os.Stderr, "Error: summary (%d bytes) is not shorter than original (%d bytes)\n", compactedSize, originalSize)
-			fmt.Fprintf(os.Stderr, "Hint: use --force to bypass size validation\n")
-			os.Exit(1)
+			FatalErrorWithHint(fmt.Sprintf("summary (%d bytes) is not shorter than original (%d bytes)", compactedSize, originalSize), "use --force to bypass size validation")
 		}
 	}
 
@@ -848,27 +888,23 @@ func runCompactApply(ctx context.Context, store *sqlite.SQLiteStorage) {
 	}
 
 	if err := store.UpdateIssue(ctx, compactID, updates, actor); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: failed to update issue: %v\n", err)
-		os.Exit(1)
+		FatalError("failed to update issue: %v", err)
 	}
 
 	commitHash := compact.GetCurrentCommitHash()
 	if err := store.ApplyCompaction(ctx, compactID, compactTier, originalSize, compactedSize, commitHash); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: failed to apply compaction: %v\n", err)
-		os.Exit(1)
+		FatalError("failed to apply compaction: %v", err)
 	}
 
 	savingBytes := originalSize - compactedSize
 	reductionPct := float64(savingBytes) / float64(originalSize) * 100
 	eventData := fmt.Sprintf("Tier %d compaction: %d → %d bytes (saved %d, %.1f%%)", compactTier, originalSize, compactedSize, savingBytes, reductionPct)
 	if err := store.AddComment(ctx, compactID, actor, eventData); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: failed to record event: %v\n", err)
-		os.Exit(1)
+		FatalError("failed to record event: %v", err)
 	}
 
 	if err := store.MarkIssueDirty(ctx, compactID); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: failed to mark dirty: %v\n", err)
-		os.Exit(1)
+		FatalError("failed to mark dirty: %v", err)
 	}
 
 	elapsed := time.Since(start)
@@ -880,24 +916,24 @@ func runCompactApply(ctx context.Context, store *sqlite.SQLiteStorage) {
 	}
 
 	if jsonOutput {
-		output := map[string]interface{}{
-			"success":        true,
-			"issue_id":       compactID,
-			"tier":           compactTier,
-			"original_size":  originalSize,
-			"compacted_size": compactedSize,
-			"saved_bytes":    savingBytes,
-			"reduction_pct":  reductionPct,
-			"elapsed_ms":     elapsed.Milliseconds(),
+		response := CompactApplyResponse{
+			Success:       true,
+			IssueID:       compactID,
+			Tier:          compactTier,
+			OriginalSize:  originalSize,
+			CompactedSize: compactedSize,
+			SavedBytes:    savingBytes,
+			ReductionPct:  reductionPct,
+			ElapsedMs:     elapsed.Milliseconds(),
 		}
 		// Include tombstone pruning results (bd-okh)
 		if tombstonePruneResult != nil && tombstonePruneResult.PrunedCount > 0 {
-			output["tombstones_pruned"] = map[string]interface{}{
-				"count":    tombstonePruneResult.PrunedCount,
-				"ttl_days": tombstonePruneResult.TTLDays,
+			response.TombstonesPruned = &TombstonePrunedInfo{
+				Count:   tombstonePruneResult.PrunedCount,
+				TTLDays: tombstonePruneResult.TTLDays,
 			}
 		}
-		outputJSON(output)
+		outputJSON(response)
 		return
 	}
 
@@ -953,6 +989,7 @@ func pruneExpiredTombstones(customTTL time.Duration) (*TombstonePruneResult, err
 			// Skip corrupt lines
 			continue
 		}
+		issue.SetDefaults() // Apply defaults for omitted fields (beads-399)
 		allIssues = append(allIssues, &issue)
 	}
 	if err := file.Close(); err != nil {
@@ -1049,6 +1086,7 @@ func previewPruneTombstones(customTTL time.Duration) (*TombstonePruneResult, err
 			// Skip corrupt lines
 			continue
 		}
+		issue.SetDefaults() // Apply defaults for omitted fields (beads-399)
 		allIssues = append(allIssues, &issue)
 	}
 
@@ -1089,6 +1127,7 @@ func init() {
 	compactCmd.Flags().BoolVar(&compactAnalyze, "analyze", false, "Analyze mode: export candidates for agent review")
 	compactCmd.Flags().BoolVar(&compactApply, "apply", false, "Apply mode: accept agent-provided summary")
 	compactCmd.Flags().BoolVar(&compactAuto, "auto", false, "Auto mode: AI-powered compaction (legacy)")
+	compactCmd.Flags().BoolVar(&compactAudit, "audit", false, "Log LLM prompt/response to .beads/interactions.jsonl (or set config audit.enabled=true)")
 	compactCmd.Flags().StringVar(&compactSummary, "summary", "", "Path to summary file (use '-' for stdin)")
 	compactCmd.Flags().StringVar(&compactActor, "actor", "agent", "Actor name for audit trail")
 	compactCmd.Flags().IntVar(&compactLimit, "limit", 0, "Limit number of candidates (0 = no limit)")
