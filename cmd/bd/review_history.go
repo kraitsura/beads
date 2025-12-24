@@ -3,9 +3,9 @@ package main
 import (
 	"fmt"
 
-	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
+	"github.com/steveyegge/beads/internal/ui"
 )
 
 var reviewHistoryCmd = &cobra.Command{
@@ -52,8 +52,7 @@ Output shows all reviews in chronological order with reviewer, type, outcome, an
 			return
 		}
 
-		cyan := color.New(color.FgCyan).SprintFunc()
-		fmt.Printf("\n%s: %s\n", cyan(issueID), issue.Title)
+		fmt.Printf("\n%s: %s\n", ui.RenderAccent(issueID), issue.Title)
 		fmt.Println("Review History:")
 
 		if len(reviews) == 0 {

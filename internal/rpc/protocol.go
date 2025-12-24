@@ -38,6 +38,7 @@ const (
 	OpGetMutations    = "get_mutations"
 	OpShutdown        = "shutdown"
 	OpDelete          = "delete"
+	OpBlocked         = "blocked"
 
 	// Gate operations (bd-likt)
 	OpGateCreate = "gate_create"
@@ -263,6 +264,12 @@ type DepRemoveArgs struct {
 type DepTreeArgs struct {
 	ID       string `json:"id"`
 	MaxDepth int    `json:"max_depth,omitempty"`
+	Reverse  bool   `json:"reverse,omitempty"`
+}
+
+// BlockedArgs represents arguments for getting blocked issues
+type BlockedArgs struct {
+	// No specific args needed for now
 }
 
 // LabelAddArgs represents arguments for adding a label

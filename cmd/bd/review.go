@@ -3,10 +3,10 @@ package main
 import (
 	"fmt"
 
-	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 )
 
 var reviewCmd = &cobra.Command{
@@ -129,8 +129,7 @@ The review command:
 				"notes":         notes,
 			})
 		} else {
-			green := color.New(color.FgGreen).SprintFunc()
-			fmt.Printf("%s Reviewed issue: %s\n", green("✓"), issueID)
+			fmt.Printf("%s Reviewed issue: %s\n", ui.RenderPass("✓"), issueID)
 			fmt.Printf("  Title: %s\n", issue.Title)
 			fmt.Printf("  Status: %s -> %s\n", formatReviewStatus(issue.ReviewStatus), outcome)
 			fmt.Printf("  Reviewer: %s\n", reviewer)
